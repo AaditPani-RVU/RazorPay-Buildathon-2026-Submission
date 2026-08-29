@@ -26,6 +26,9 @@ packages = ["src/backstop"]
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
+markers = [
+    "slow: generates full-size scenarios; skip with -m 'not slow' while iterating",
+]
 
 [tool.ruff]
 line-length = 100

@@ -146,6 +146,12 @@ class ScenarioGenerator:
             # Customers reach 3DS and leave. Recoverable, but never by retrying.
             (RootCause.AUTHENTICATION_DROPOFF, Segment(rail=Rail.CARD),
              0.84, 180, 0.62, DeclineCode.OTP_ABANDONED, 0.83),
+            # A genuine funds crunch, not a system fault. Detection *should*
+            # fire -- the money is really at risk -- but diagnosis must not call
+            # it an outage and recovery must wait for payday rather than
+            # hammering the issuer. Discrimination, not just alarm.
+            (RootCause.INSUFFICIENT_FUNDS_CLUSTER, Segment(),
+             0.29, 240, 0.74, DeclineCode.INSUFFICIENT_FUNDS, 0.68),
         ]
         incidents = []
         for cause, seg, frac, minutes, mult, code, share in specs:
