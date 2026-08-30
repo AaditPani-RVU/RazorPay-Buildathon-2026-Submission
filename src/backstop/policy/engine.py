@@ -60,6 +60,10 @@ class Verdict:
 @dataclass
 class PolicyConfig:
     max_contacts_per_subject: int = 3
+    max_contacts_per_customer: int = 6
+    """A ceiling on the *person*, not the debt. Higher than the per-subject cap
+    because somebody with two unrelated problems may hear about both, and far
+    below the sum of their subjects, because they are still one person."""
     contact_window_days: int = 14
     quiet_hours_start_ist: int = 21
     quiet_hours_end_ist: int = 9
@@ -81,6 +85,11 @@ class PolicyContext:
     invoice: Invoice | None = None
     subscription: Subscription | None = None
     contacts: list[ContactRecord] = field(default_factory=list)
+    """Everything already sent about *this subject*."""
+    customer_contacts: list[ContactRecord] = field(default_factory=list)
+    """Everything already sent to this person, about any subject. Separate from
+    `contacts` because the two answer different questions and conflating them
+    would make one of the rules below silently unenforceable."""
     diagnosis: RootCause | None = None
     outage_until: datetime | None = None
     config: PolicyConfig = field(default_factory=PolicyConfig)
@@ -268,6 +277,40 @@ class ContactFrequencyRule:
 
 
 @dataclass
+class ContactFatigueRule:
+    """The stopping rule for the *person*, where the frequency cap stops the debt.
+
+    A per-subject cap is the obvious one and it is not enough, because a
+    subject is not a person. One buyer sits behind four overdue invoices; one
+    customer has a failed order, a lapsed mandate and a second failed order
+    the following week. Every per-subject cap can be scrupulously observed
+    while that person is contacted a dozen times in a fortnight, and each
+    individual message passes review.
+
+    This is the receivables surface's characteristic hazard rather than a
+    general nicety -- invoices cluster on buyers far harder than orders
+    cluster on customers -- but the rule is written on the customer because
+    the harm is, and it protects all three surfaces for the same reason.
+    """
+
+    id: str = "contact_fatigue"
+
+    def check(self, action: Action, ctx: PolicyContext) -> Verdict | None:
+        if not action.is_contact or ctx.customer is None:
+            return None
+        cfg = ctx.config
+        since = ctx.now - timedelta(days=cfg.contact_window_days)
+        recent = [c for c in ctx.customer_contacts if utc(c.at) >= since]
+        if len(recent) >= cfg.max_contacts_per_customer:
+            subjects = len({c.subject_ref for c in recent})
+            return Verdict(self.id, Disposition.DENY,
+                           f"{len(recent)} contacts to this customer across {subjects} "
+                           f"subject(s) in {cfg.contact_window_days}d reaches the "
+                           f"per-person cap of {cfg.max_contacts_per_customer}")
+        return None
+
+
+@dataclass
 class DisputeFreezeRule:
     """A contested invoice is a conversation, not a collection."""
 
@@ -448,6 +491,7 @@ DEFAULT_RULES: list[Rule] = [
     RetryBudgetRule(),
     ConsentRule(),
     ContactFrequencyRule(),
+    ContactFatigueRule(),
     CostOfRecoveryRule(),
     HighValueApprovalRule(),
     RetrySpacingRule(),

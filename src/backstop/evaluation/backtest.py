@@ -45,9 +45,11 @@ from backstop.decide.planner import (
     RecoveryStrategy,
     expand,
     mandate_actions,
+    naive_invoice_chase,
     naive_mandate_chase,
     naive_retry,
     orders_in_cluster,
+    receivable_actions,
     tail_actions,
 )
 from backstop.detect.correlate import correlate
@@ -79,6 +81,8 @@ class Proposal:
     """Actions from the deterministic playbook, for failures with no incident."""
     from_mandates: int = 0
     """Actions from the mandate scan, for recurring revenue that stopped."""
+    from_receivables: int = 0
+    """Actions from the aged ledger, for invoices that were never paid."""
     diagnosis_by_order: dict[str, RootCause] = field(default_factory=dict)
     outage_by_order: dict[str, datetime] = field(default_factory=dict)
     llm_calls: int = 0
@@ -122,11 +126,14 @@ def run_arm(
     engine = PolicyEngine()
     orders = {o.id: o for o in scenario.orders}
     subs = {s.id: s for s in scenario.subscriptions}
+    invoices = {i.id: i for i in scenario.invoices}
     executor = SimulatedExecutor(
         orders=orders,
         recoverability=scenario.recoverability,
         subscriptions=subs,
         mandate_recovery=scenario.mandate_recovery,
+        invoices=invoices,
+        invoice_recovery=scenario.invoice_recovery,
     )
     ledger = RecoveryLedger(arm=name)
     violations: list[Violation] = []
@@ -134,17 +141,29 @@ def run_arm(
     # Contact history accumulates as the arm runs, so frequency caps and
     # fatigue see what this arm has actually already sent.
     sent: dict[str, list[ContactRecord]] = {}
+    # The same contacts indexed by person rather than by subject. Kept
+    # alongside rather than derived, because the per-person cap has to be
+    # answerable at the moment an action is judged, not reconstructed after.
+    sent_to: dict[str, list[ContactRecord]] = {}
 
     for action in sorted(actions, key=lambda a: utc(a.scheduled_at)):
-        # An action's subject is either a failed order or, on the recurring
-        # surface, the subscription itself: re-registering a lapsed mandate
-        # acts on the authorisation, not on any one presentation of it.
+        # An action's subject names its surface. On payments that is the
+        # failed order; on recurring it is the subscription itself, because
+        # re-registering a lapsed mandate acts on the authorisation rather
+        # than on any one presentation of it; on receivables it is the invoice.
         subject_sub = subs.get(action.subject_id)
+        subject_inv = invoices.get(action.subject_id)
         order = orders.get(action.subject_id)
+        invoice = None
         if subject_sub is not None:
             surface = Surface.RECURRING
             customer = scenario.customers.get(subject_sub.customer_id)
             subscription = subject_sub
+        elif subject_inv is not None:
+            surface = Surface.RECEIVABLE
+            customer = scenario.customers.get(subject_inv.buyer_id)
+            subscription = None
+            invoice = subject_inv
         else:
             surface = Surface.PAYMENT
             customer = scenario.customers.get(order.customer_id) if order else None
@@ -154,8 +173,10 @@ def run_arm(
             now=utc(action.scheduled_at),
             customer=customer,
             order=order,
+            invoice=invoice,
             subscription=subscription,
             contacts=sent.get(action.subject_id, []),
+            customer_contacts=sent_to.get(customer.id, []) if customer else [],
             diagnosis=diagnosis_by_order.get(action.subject_id),
             outage_until=outage_by_order.get(action.subject_id),
         )
@@ -181,15 +202,16 @@ def run_arm(
                     break
 
         if final.is_contact and final.channel:
-            sent.setdefault(final.subject_id, []).append(
-                ContactRecord(
-                    id=new_id("contact"),
-                    customer_id=customer.id if customer else "",
-                    channel=final.channel,
-                    at=at,
-                    subject_ref=final.subject_id,
-                )
+            record = ContactRecord(
+                id=new_id("contact"),
+                customer_id=customer.id if customer else "",
+                channel=final.channel,
+                at=at,
+                subject_ref=final.subject_id,
             )
+            sent.setdefault(final.subject_id, []).append(record)
+            if customer:
+                sent_to.setdefault(customer.id, []).append(record)
 
     return ArmResult(name=name, ledger=ledger, violations=violations)
 
@@ -266,6 +288,14 @@ def build_backstop_actions(
         actions.extend(mandate_actions(sub, scenario.ends_at))
     proposal.from_mandates = len(actions) - proposal.from_model - proposal.from_tail
 
+    # The receivables surface. A third non-incident: the aged ledger, where
+    # what selects the response is how old the money is rather than what went
+    # wrong with it. Deterministic for the same reason as the other two.
+    before = len(actions)
+    for inv in scenario.overdue_invoices:
+        actions.extend(receivable_actions(inv, scenario.ends_at))
+    proposal.from_receivables = len(actions) - before
+
     return proposal
 
 
@@ -277,11 +307,14 @@ def run(scenario: Scenario, *, offline: bool, model: str | None) -> list[ArmResu
                 diagnosis_by_order={}, outage_by_order={}),
     ]
 
-    # The naive arm gets the recurring surface too, or the comparison would be
+    # The naive arm works all three surfaces, or the comparison would be
     # unfair in Backstop's favour: an arm that never touches a book of dead
-    # mandates cannot be criticised for how it touches them.
-    naive_actions = naive_retry(failed) + naive_mandate_chase(
-        scenario.subscriptions, scenario.ends_at
+    # mandates or an aged debtors ledger cannot be criticised for how it
+    # touches them.
+    naive_actions = (
+        naive_retry(failed)
+        + naive_mandate_chase(scenario.subscriptions, scenario.ends_at)
+        + naive_invoice_chase(scenario.invoices, scenario.ends_at)
     )
     with console.status("naive-retry..."):
         arms.append(
@@ -361,6 +394,32 @@ def render(scenario: Scenario, arms: list[ArmResult], prop: Proposal) -> None:
         f"{len(scenario.lapsed_subscriptions):,} lapsed mandates.[/dim]"
     )
 
+    console.print("\n[bold]receivables[/bold]  invoices that were never paid\n")
+    console.print(_arm_table(arms, Surface.RECEIVABLE, "invoices"))
+    # Ground truth, read by the eval rather than by the agent. Printing the
+    # counterfactual beside the result is the only way the receivables number
+    # can be read correctly: without it, an arm that chased everything and
+    # booked whatever arrived would look like the best collections team alive.
+    outstanding = {i.id: i.outstanding for i in scenario.invoices}
+    self_cure = Money.zero()
+    incremental = Money.zero()
+    for rec in scenario.invoice_recovery.values():
+        amount = outstanding.get(rec.invoice_id, Money.zero())
+        if rec.pays_unprompted:
+            self_cure += amount
+        elif rec.would_pay_if_chased:
+            incremental += amount
+    console.print(
+        f"  [dim]{scenario.receivables_at_risk} outstanding across "
+        f"{len(scenario.overdue_invoices):,} overdue invoices. Of that, "
+        f"{self_cure} arrives on the\n"
+        f"  buyer's own cycle whether anybody acts or not, and is credited to nobody; "
+        f"{incremental}\n"
+        "  is the most any collections effort could add. Credit is incremental here too,\n"
+        "  and it bites hardest on this surface. A part-payment offer collects a share\n"
+        "  of the balance, not the whole.[/dim]"
+    )
+
     total_at_risk = Money.zero()
     for o in scenario.orders:
         total_at_risk += o.amount_at_risk
@@ -422,7 +481,8 @@ def render(scenario: Scenario, arms: list[ArmResult], prop: Proposal) -> None:
         console.print(
             f"  proposed          {led.proposed:,}   "
             f"[dim]({prop.from_model:,} from the model, {prop.from_tail:,} from the "
-            f"tail playbook, {prop.from_mandates:,} from the mandate scan)[/dim]"
+            f"tail playbook, {prop.from_mandates:,} from the mandate scan, "
+            f"{prop.from_receivables:,} from the aged ledger)[/dim]"
         )
         console.print(f"  vetoed            {len(led.vetoed):,}")
         console.print(f"  rescheduled       {len(led.rescheduled):,}")

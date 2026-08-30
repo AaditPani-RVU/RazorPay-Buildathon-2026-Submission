@@ -1,5 +1,5 @@
-"""Ground truth about what would actually recover each failed order and each
-lapsed mandate.
+"""Ground truth about what would actually recover each failed order, each
+lapsed mandate and each overdue invoice.
 
 This is the crux of the whole measurement claim, so it is worth being blunt
 about what it is. The backtest reports money recovered; that number is only
@@ -28,7 +28,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 from backstop.domain.declines import DeclineCode, RetryClass
-from backstop.domain.entities import MandateStatus, Order, Subscription
+from backstop.domain.entities import Invoice, MandateStatus, Order, Subscription
 
 #: Probability a retry succeeds *once the underlying blocker has cleared*, and
 #: probability a customer acts on a contact. Keyed by what actually failed.
@@ -253,3 +253,189 @@ def build_mandates(
             responsive_until=reference + patience if would else None,
         )
     return out
+
+
+# --------------------------------------------------------------------------
+# Receivables
+# --------------------------------------------------------------------------
+#
+# The counterfactual matters more on this surface than on either of the other
+# two, and getting it wrong is how every collections tool on the market
+# reports a number nobody should believe.
+#
+# Most overdue B2B invoices are paid whether or not anybody chases them. A
+# buyer's accounts-payable department runs on a cycle; an invoice that is
+# twelve days late is usually not a collections problem, it is a Tuesday. An
+# agent that mails those buyers and then books the payment has measured the
+# AP cycle and called it recovery.
+#
+# So the incremental value of collections is not the overdue balance. It is
+# the far smaller slice that would *not* have arrived on its own -- and that
+# slice has a shape worth knowing: it is thin among recent invoices, which
+# mostly pay themselves, thin again among ancient ones, which mostly never
+# pay, and thickest in the middle where a reminder actually changes the
+# outcome.
+
+#: Share of overdue invoices in each bucket that get paid if somebody chases.
+#:
+#: Deliberately *not* `detect.receivables.COLLECTION_ODDS`. That table is what
+#: Backstop publishes and reasons with; this one is what the world does.
+#: Grading the agent against its own estimate would make the result a
+#: tautology.
+COLLECTION_TRUTH: dict[str, float] = {
+    "1-30": 0.91,
+    "31-60": 0.68,
+    "61-90": 0.47,
+    "90+": 0.19,
+}
+
+#: Share that get paid with no contact at all -- the AP cycle turning over.
+#:
+#: Nested inside COLLECTION_TRUTH by construction below: a buyer who would
+#: have paid unprompted would also have paid if asked, so self-curing invoices
+#: are a subset of collectable ones rather than an independent draw. Anything
+#: else would let an invoice be "would not pay if chased, but pays if left
+#: alone", which is not a thing.
+SELF_CURE_TRUTH: dict[str, float] = {
+    "1-30": 0.79,
+    "31-60": 0.44,
+    "61-90": 0.21,
+    "90+": 0.05,
+}
+
+#: Share of collectable invoices where the buyer cannot clear the balance in
+#: one payment. Dunning these harder achieves nothing -- the money is not
+#: there in one piece -- and only a part-payment offer unlocks anything.
+#: Rises with age, because the buyers who are still not paying at ninety days
+#: are disproportionately the ones who cannot.
+CASHFLOW_CONSTRAINED: dict[str, float] = {
+    "1-30": 0.12,
+    "31-60": 0.20,
+    "61-90": 0.30,
+    "90+": 0.35,
+}
+
+#: What share of the balance a constrained buyer can actually find.
+PART_PAYMENT_SHARE: tuple[float, float] = (0.35, 0.75)
+
+#: How long an overdue invoice stays collectable, in days from the scan.
+#:
+#: Weeks, not hours. Receivables are the most patient of the three surfaces --
+#: an AP department has a cycle, not a deadline -- and a dunning cadence tuned
+#: to a failed checkout would burn a buyer relationship to save nothing.
+COLLECTION_WINDOW_DAYS: tuple[float, float] = (10.0, 75.0)
+
+
+@dataclass(frozen=True)
+class InvoiceRecovery:
+    """What would actually collect one overdue invoice. Drawn once per invoice."""
+
+    invoice_id: str
+    would_pay_if_chased: bool
+    pays_unprompted: bool
+    """Whether the AP cycle would have produced the money with no contact."""
+    needs_part_payment: bool
+    """The buyer has the intent but not the balance. Only an offer unlocks it."""
+    part_payment_share: float
+    """Largest fraction of the outstanding a constrained buyer can find. Only
+    consulted when `needs_part_payment`; a buyer who can clear the balance
+    pays whatever was asked instead."""
+    responsive_until: datetime | None
+
+    @property
+    def is_incremental(self) -> bool:
+        """Whether chasing this invoice collects anything the merchant did not
+        already have coming. Recovery is a delta, not a total."""
+        return self.would_pay_if_chased and not self.pays_unprompted
+
+    def collects_at(self, at: datetime, *, offered_share: float | None) -> float:
+        """Share of the outstanding balance collected by acting at `at`.
+
+        `offered_share` is None for a plain reminder, which asks for the whole
+        balance, and the fraction proposed for a part-payment offer.
+
+        Nothing is collected from an invoice that was going to arrive anyway,
+        one that was never going to arrive, or one chased after the buyer
+        stopped paying attention. Past those, what lands depends on whether
+        the blocker is attention or money.
+
+        A buyer who *can* clear the balance pays whatever was asked -- the
+        whole of it to a reminder, the instalment to an offer. Offering a
+        split to one of them therefore collects less than a reminder would
+        have, which is the cost of using the instrument in the wrong place
+        and it should be visible rather than modelled away.
+
+        A buyer who *cannot* pay a demand for the whole balance returns
+        nothing to a reminder however firmly it is written, and to an offer
+        returns the lesser of what was asked and what they can find.
+        """
+        if not self.is_incremental or self.responsive_until is None:
+            return 0.0
+        if at > self.responsive_until:
+            return 0.0
+        if self.needs_part_payment:
+            if offered_share is None:
+                return 0.0
+            return min(self.part_payment_share, offered_share)
+        return 1.0 if offered_share is None else offered_share
+
+
+def build_invoices(
+    invoices: list[Invoice], reference: datetime, seed: int
+) -> dict[str, InvoiceRecovery]:
+    """Assign latent collectability to every invoice that is overdue at `reference`.
+
+    Disputed invoices are given no latent outcome at all. That is not an
+    oversight: a dispute is a disagreement about whether the money is owed,
+    and its resolution is a conversation rather than a collections outcome.
+    Modelling a probability that dunning settles one would invent a reward for
+    exactly the behaviour `dispute_freeze` exists to refuse.
+
+    Its own RNG stream, for the same reason the other two builders have one.
+    """
+    rng = random.Random(seed ^ 0x2EC1E5)
+    out: dict[str, InvoiceRecovery] = {}
+
+    for inv in invoices:
+        if inv.is_settled or inv.disputed_at is not None:
+            continue
+        if not inv.is_overdue(reference):
+            continue
+        bucket = _bucket(inv.days_overdue(reference))
+        # One uniform draw against two nested thresholds, so that self-curing
+        # invoices are a subset of collectable ones rather than an independent
+        # coin. The same trick the generator uses for incident attribution,
+        # and for the same reason: it makes the counterfactual exact.
+        u = rng.random()
+        chased = u < COLLECTION_TRUTH[bucket]
+        unprompted = u < SELF_CURE_TRUTH[bucket]
+        constrained = rng.random() < CASHFLOW_CONSTRAINED[bucket]
+        share = rng.uniform(*PART_PAYMENT_SHARE)
+        patience = timedelta(days=rng.uniform(*COLLECTION_WINDOW_DAYS))
+        out[inv.id] = InvoiceRecovery(
+            invoice_id=inv.id,
+            would_pay_if_chased=chased,
+            pays_unprompted=unprompted,
+            needs_part_payment=constrained,
+            part_payment_share=share,
+            responsive_until=reference + patience if chased else None,
+        )
+    return out
+
+
+def _bucket(days_overdue: int) -> str:
+    """Aging bracket, duplicated from `detect.receivables` on purpose.
+
+    Ground truth must not import the agent's own detection module. If the two
+    ever needed to disagree about where a boundary sits, that disagreement
+    should show up as a measurable error rather than be made impossible by a
+    shared constant -- and a truth table that depends on the agent's code is
+    one refactor away from being defined by it.
+    """
+    if days_overdue <= 30:
+        return "1-30"
+    if days_overdue <= 60:
+        return "31-60"
+    if days_overdue <= 90:
+        return "61-90"
+    return "90+"

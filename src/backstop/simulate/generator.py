@@ -28,6 +28,7 @@ from backstop.domain.entities import (
     MandateStatus,
     Order,
     PaymentAttempt,
+    PromiseToPay,
     Subscription,
 )
 from backstop.domain.money import Money
@@ -62,7 +63,23 @@ class SimConfig:
     shape of the problem: mandate faults are slow, and only a slow window can
     see them. Lowering the detector's floor instead would have been tuning the
     measurement to the test."""
-    n_invoices: int = 220
+    n_invoices: int = 1400
+    """A B2B ledger issued across roughly four months, so it ages into every
+    bracket rather than only the recent ones.
+
+    Moved up from 220, where the surface was measurable but not *stable*: only
+    about fourteen invoices in the whole batch were incremental -- collectable,
+    but not already coming -- so the entire gap between arms rested on a
+    handful of draws and moved several percent between seeds. The problem was
+    the sample, not the method, and widening the ledger was the honest fix.
+    Loosening the incrementality test to admit self-curing invoices would have
+    produced a bigger, steadier and completely false number."""
+    n_buyers: int = 320
+    """AP contacts the invoices are spread across. Far fewer than invoices, on
+    purpose: at one buyer per invoice a per-invoice contact cap looks like it
+    protects somebody, and the buyer with five overdue invoices -- who can be
+    mailed five times over without any single cap binding -- does not exist to
+    be found."""
     rails: list[RailProfile] = field(default_factory=lambda: list(DEFAULT_RAILS))
     issuers: dict[str, float] = field(default_factory=lambda: dict(DEFAULT_ISSUERS))
     acquirers: dict[str, float] = field(default_factory=lambda: dict(DEFAULT_ACQUIRERS))
@@ -304,7 +321,14 @@ class ScenarioGenerator:
         subs, sub_orders, sub_by_order = self._subscriptions(start, end, cust_ids, incidents)
         orders.extend(sub_orders)
         orders.sort(key=lambda o: o.created_at)
-        invoices = self._invoices(start, end)
+
+        # Buyers join the same customer book as everyone else. They are drawn
+        # after orders and mandates so their ids never enter `cust_ids` -- an
+        # AP contact does not place consumer checkouts -- and so that adding
+        # this population left every payment and recurring number untouched.
+        buyers = self._buyers()
+        customers.update(buyers)
+        invoices = self._invoices(start, end, list(buyers))
 
         # Latent recoverability, drawn once so every backtest arm faces the
         # same world. An incident-caused failure heals when its incident ends,
@@ -326,6 +350,8 @@ class ScenarioGenerator:
             # Recurring truth is scanned at the end of the window, because
             # that is the first moment an agent could have acted on the book.
             mandate_recovery=recov.build_mandates(subs, end, cfg.seed),
+            # Receivables are aged from the same moment for the same reason.
+            invoice_recovery=recov.build_invoices(invoices, end, cfg.seed),
         )
 
     def _subscriptions(self, start, end, cust_ids, incidents):
@@ -410,8 +436,60 @@ class ScenarioGenerator:
 
         return subs, orders, sub_by_order
 
-    def _invoices(self, start, end) -> list[Invoice]:
-        """B2B receivables, aged around the window so some are already overdue."""
+    def _buyers(self) -> dict[str, Customer]:
+        """The accounts-payable contacts behind the invoices.
+
+        A buyer is a `Customer` like any other, and making them one is not
+        tidiness -- it is what lets the consent rule work on this surface at
+        all. Contact policy that only knows about consumers would wave every
+        collections email through unchecked, which is precisely backwards: an
+        AP contact is a named individual at a company and the rules that
+        protect a consumer protect them too.
+
+        The consent shape is genuinely different, though, and pretending
+        otherwise would be its own kind of wrong. Email is near-universal
+        because the invoice arrived that way and the correspondence already
+        exists. Phone consent is rarer but voice consent is *commoner* than
+        for consumers, because ringing accounts payable about an overdue
+        invoice is ordinary business rather than an intrusion. And fewer
+        business lines sit on the national DND registry, which covers
+        individual subscribers.
+        """
+        rng = self.rng
+        out: dict[str, Customer] = {}
+        for _ in range(self.cfg.n_buyers):
+            bid = self._id("buyer")
+            channels = {Channel.EMAIL}
+            has_phone = rng.random() < 0.55
+            if has_phone:
+                if rng.random() < 0.50:
+                    channels.add(Channel.SMS)
+                if rng.random() < 0.35:
+                    channels.add(Channel.WHATSAPP)
+                if rng.random() < 0.30:
+                    channels.add(Channel.VOICE)
+            out[bid] = Customer(
+                id=bid,
+                email=f"ap-{bid}@example.test",
+                phone=f"+9180{rng.randint(10**7, 10**8 - 1)}" if has_phone else None,
+                consented_channels=channels,
+                dnd_registered=rng.random() < 0.06,
+                # A buyer who told a merchant to stop emailing them about
+                # invoices has still done so, and it still binds.
+                opted_out_at=None if rng.random() > 0.03 else self.cfg.resolved_start(),
+            )
+        return out
+
+    def _invoices(self, start, end, buyer_ids: list[str]) -> list[Invoice]:
+        """B2B receivables, aged around the window so some are already overdue.
+
+        Invoices are spread across a much smaller pool of buyers than there are
+        invoices, because that is how a B2B ledger actually looks and because
+        the one-invoice-one-buyer shape hides the surface's real hazard: a
+        per-invoice contact cap does not bind on a buyer sitting behind five
+        overdue invoices, who can be mailed five times over without any single
+        cap noticing.
+        """
         rng = self.rng
         out = []
         for _ in range(self.cfg.n_invoices):
@@ -419,7 +497,7 @@ class ScenarioGenerator:
             terms = rng.choice([15, 30, 45, 60])
             amount = Money.rupees(round(math.exp(rng.gauss(11.2, 1.0)), 2))
             inv = Invoice(
-                id=self._id("inv"), buyer_id=self._id("buyer"), amount=amount,
+                id=self._id("inv"), buyer_id=rng.choice(buyer_ids), amount=amount,
                 issued_at=issued, due_at=issued + timedelta(days=terms),
             )
             # Most receivables are collected without help. Only the residue is
@@ -435,6 +513,22 @@ class ScenarioGenerator:
             # A minority are contested. These must never be auto-chased.
             if not inv.is_settled and rng.random() < 0.09:
                 inv.disputed_at = inv.due_at + timedelta(days=rng.randint(1, 10))
+            # Some buyers have already committed to a date. A promise is only
+            # generated where somebody could plausibly have made one -- overdue,
+            # not settled, not contested -- and roughly half are still live at
+            # the scan, so the rule guards both the case where it binds and the
+            # case where it has lapsed and chasing resumes.
+            promisable = (
+                not inv.is_settled
+                and inv.disputed_at is None
+                and inv.is_overdue(end)
+            )
+            if promisable and rng.random() < 0.18:
+                inv.promise = PromiseToPay(
+                    promised_at=inv.due_at + timedelta(days=rng.randint(1, 20)),
+                    promised_for=end + timedelta(days=rng.randint(-12, 12)),
+                    amount=inv.outstanding,
+                )
             out.append(inv)
         return out
 

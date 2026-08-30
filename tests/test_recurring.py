@@ -232,37 +232,68 @@ def test_no_mandate_is_recovered_twice(arms):
         assert len(won) == len(set(won))
 
 
-def test_policing_the_recurring_surface_costs_no_revenue_at_all(arms):
-    """The README's central recurring claim, as an executable one.
+def test_policing_the_recurring_surface_costs_almost_nothing(arms):
+    """The README's central recurring claim, as an executable one, and the
+    price of it stated rather than rounded away.
 
-    Strip from the naive arm the money it took with actions the rules refuse,
-    and what remains is exactly what the policed arm recovered -- not close to
-    it, equal to it. Re-registration is drawn once per customer, so asking
-    three times buys no extra chances; both arms reach every mandate they are
-    allowed to reach, and naive's remaining contacts are pure waste. If this
-    ever stops holding, the claim that the leash is free on this surface has
-    stopped being true and the README needs to say something else.
+    Re-registration is drawn once per customer, so asking three times buys no
+    extra chances. Nearly all of naive's extra contacts are therefore pure
+    waste, and stripping the money it took with actions the rules refuse
+    leaves it level with the policed arm -- which is why this claim used to be
+    an exact equality.
+
+    It is no longer exact, and the reason is worth keeping visible rather than
+    rounding away. The per-person contact cap does not care that a customer's
+    lapsed mandate and their failed orders are different subjects; past six
+    messages in a fortnight it stops writing to the person, and occasionally
+    the message it stops would have landed. That costs the recurring surface a
+    mandate or two.
+
+    So the claim this test defends is a bounded price, not a free lunch:
+    across six seeds policing costs this surface between nothing and 1.1% of
+    what naive keeps, and buys a hard ceiling on how often any one person is
+    contacted. The bound below is set above the observed worst case with room
+    to spare, so it catches the price *growing* rather than tracking. Whether
+    that trade is worth making is a judgement, and it is stated so a reader
+    can disagree with it. What must not happen is the price quietly growing.
     """
     _, by_name = arms
     naive = by_name["naive-retry"].ledger.on(Surface.RECURRING)
     policed = by_name["backstop"].ledger.on(Surface.RECURRING)
 
-    assert naive.compliant_recovered == policed.recovered
+    forgone = naive.compliant_recovered - policed.compliant_recovered
+    assert forgone.paise >= 0
+    assert forgone.as_rupees < 0.015 * naive.compliant_recovered.as_rupees, (
+        "policing should still cost the recurring surface around a percent; if it "
+        "has started costing real money, the README's claim needs rewriting"
+    )
     assert naive.orders_recovered > policed.orders_recovered, (
         "naive should still recover more mandates -- the illegal ones"
     )
-    assert policed.compliant_net > naive.compliant_net, (
-        "identical revenue for fewer contacts means the policed arm nets more"
+    assert policed.contacts_sent < naive.contacts_sent / 2, (
+        "and it should be reaching them with less than half the contact"
     )
 
 
 def test_recurring_is_never_folded_into_the_payments_number(arms):
-    """The two surfaces are different units. A reader who takes the payments
-    row must not be reading a total that has a year of billing hidden in it."""
+    """The surfaces are different units. A reader who takes the payments row
+    must not be reading a total that has a year of billing hidden in it.
+
+    The partition is asserted rather than the pair, so that adding a fourth
+    surface later cannot quietly let one of them go unreported: every entry
+    belongs to exactly one surface, and the surfaces sum to the whole.
+    """
     _, by_name = arms
     led = by_name["backstop"].ledger
     payments = led.on(Surface.PAYMENT)
     recurring = led.on(Surface.RECURRING)
-    assert payments.recovered + recurring.recovered == led.recovered
+
+    partition = Money.zero()
+    for surface in Surface:
+        partition += led.on(surface).recovered
+    assert partition == led.recovered
+    assert sum(led.on(s).proposed for s in Surface) == led.proposed
+
     assert recurring.recovered
     assert payments.recovered != led.recovered
+    assert recurring.recovered != led.recovered

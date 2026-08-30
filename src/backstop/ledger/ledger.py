@@ -232,7 +232,10 @@ class RecoveryLedger:
                 continue
             for v in ruling.verdicts:
                 if v.disposition is Disposition.DENY:
-                    out.append(Violation(entry.action, v.rule_id, v.reason))
+                    # The surface comes off the entry rather than the default,
+                    # or a replayed audit would file every refusal under
+                    # payments and a per-surface violation count would lie.
+                    out.append(Violation(entry.action, v.rule_id, v.reason, entry.surface))
                     break
         return out
 

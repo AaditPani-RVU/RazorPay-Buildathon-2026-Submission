@@ -19,7 +19,11 @@ from datetime import datetime
 from backstop.domain.declines import DeclineCode, Rail, RootCause
 from backstop.domain.entities import Customer, Invoice, Order, Subscription
 from backstop.domain.money import Money
-from backstop.simulate.recoverability import MandateRecovery, Recoverability
+from backstop.simulate.recoverability import (
+    InvoiceRecovery,
+    MandateRecovery,
+    Recoverability,
+)
 
 
 @dataclass(frozen=True)
@@ -110,6 +114,27 @@ class Scenario:
     mandate_recovery: dict[str, MandateRecovery] = field(default_factory=dict)
     """The same, for lapsed mandates: who would re-authorise if asked, who
     would have come back unprompted, and how long either stays reachable."""
+    invoice_recovery: dict[str, InvoiceRecovery] = field(default_factory=dict)
+    """The same, for overdue invoices: who would pay if chased, who was going
+    to pay anyway, and who cannot clear the balance in one go."""
+
+    @property
+    def overdue_invoices(self) -> list[Invoice]:
+        """Invoices past their due date with money still on them. Disputed
+        ones are included -- the money is genuinely at risk -- because whether
+        they may be *chased* is a policy question, not a detection one."""
+        return [
+            i for i in self.invoices
+            if not i.is_settled and i.is_overdue(self.ends_at)
+        ]
+
+    @property
+    def receivables_at_risk(self) -> Money:
+        """Outstanding balance across every overdue invoice."""
+        total = Money.zero()
+        for inv in self.overdue_invoices:
+            total += inv.outstanding
+        return total
 
     @property
     def lapsed_subscriptions(self) -> list[Subscription]:
