@@ -36,6 +36,8 @@ from backstop.simulate.scenario import (
     DEFAULT_ACQUIRERS,
     DEFAULT_ISSUERS,
     DEFAULT_RAILS,
+    MANDATE_RAILS,
+    MANDATE_STATUS_DECLINE,
     Incident,
     RailProfile,
     Scenario,
@@ -50,7 +52,16 @@ class SimConfig:
     orders_per_day: int = 20000
     start: datetime | None = None
     n_customers: int = 25000
-    n_subscriptions: int = 600
+    n_subscriptions: int = 8000
+    """Renewals falling due inside the window, split across two mandate rails.
+
+    At 600 a mandate problem was invisible at every resolution, which made
+    subscription detection untestable rather than hard. 8000 puts each rail at
+    roughly 95 presentations per four-hour bucket -- above the volume floor at
+    the coarse resolution and below it at every finer one, which is the honest
+    shape of the problem: mandate faults are slow, and only a slow window can
+    see them. Lowering the detector's floor instead would have been tuning the
+    measurement to the test."""
     n_invoices: int = 220
     rails: list[RailProfile] = field(default_factory=lambda: list(DEFAULT_RAILS))
     issuers: dict[str, float] = field(default_factory=lambda: dict(DEFAULT_ISSUERS))
@@ -147,6 +158,13 @@ class ScenarioGenerator:
             # Customers reach 3DS and leave. Recoverable, but never by retrying.
             (RootCause.AUTHENTICATION_DROPOFF, Segment(rail=Rail.CARD),
              0.84, 180, 0.62, DeclineCode.OTP_ABANDONED, 0.83),
+            # A cohort of mandates registered together reaches the end of its
+            # validity together. Slow, quiet, and worth real recurring revenue.
+            # Only the coarse resolution can see it: mandate presentations are
+            # a fraction of card volume, so at 15m buckets the segment never
+            # clears the volume floor at all.
+            (RootCause.MANDATE_LIFECYCLE_FAILURE, Segment(rail=Rail.EMANDATE_NACH),
+             0.44, 600, 0.46, DeclineCode.MANDATE_EXPIRED, 0.81),
             # A genuine funds crunch, not a system fault. Detection *should*
             # fire -- the money is really at risk -- but diagnosis must not call
             # it an outage and recovery must wait for payday rather than
@@ -235,7 +253,7 @@ class ScenarioGenerator:
             issuer = _weighted(rng, cfg.issuers)
             acquirer = _weighted(rng, cfg.acquirers)
             bin_ = self._bin_for(issuer) if rail is Rail.CARD else None
-            seg_key = dict(rail=rail, issuer=issuer, bin=bin_, acquirer=acquirer)
+            seg_key = {"rail": rail, "issuer": issuer, "bin": bin_, "acquirer": acquirer}
 
             active = [i for i in incidents if i.is_active(t) and i.segment.matches(**seg_key)]
             multiplier = 1.0
@@ -283,7 +301,9 @@ class ScenarioGenerator:
                 for inc in active:
                     inc.baseline_failures_in_window += 1
 
-        subs = self._subscriptions(start, end, cust_ids)
+        subs, sub_orders, sub_by_order = self._subscriptions(start, end, cust_ids, incidents)
+        orders.extend(sub_orders)
+        orders.sort(key=lambda o: o.created_at)
         invoices = self._invoices(start, end)
 
         # Latent recoverability, drawn once so every backtest arm faces the
@@ -301,29 +321,91 @@ class ScenarioGenerator:
         return Scenario(
             customers=customers, orders=orders, subscriptions=subs, invoices=invoices,
             incidents=incidents, starts_at=start, ends_at=end, seed=cfg.seed,
+            subscription_by_order=sub_by_order,
             recoverability=recov.build(orders, heals, routing, cfg.seed),
         )
 
-    def _subscriptions(self, start, end, cust_ids) -> list[Subscription]:
+    def _subscriptions(self, start, end, cust_ids, incidents):
+        """Build subscriptions and actually present their renewal charges.
+
+        A mandate presentation is a payment attempt, so it is modelled as one.
+        That is not a shortcut -- it means the existing detector, evidence
+        builder and recovery path all work on subscriptions with no special
+        casing, and a mandate problem shows up in the same segment views as
+        everything else.
+
+        Returns the subscriptions, the orders their presentations created, and
+        the mapping back, which recovery needs: re-registering a lapsed mandate
+        acts on the subscription, not on the order that just failed.
+        """
         rng = self.rng
         statuses = [
             (MandateStatus.ACTIVE, 0.83), (MandateStatus.PAUSED, 0.05),
             (MandateStatus.EXPIRED, 0.07), (MandateStatus.REVOKED, 0.05),
         ]
-        out = []
+        profiles = {p.rail: p for p in MANDATE_RAILS}
+        subs: list[Subscription] = []
+        orders: list[Order] = []
+        sub_by_order: dict[str, str] = {}
+
+        span = (end - start).total_seconds()
         for _ in range(self.cfg.n_subscriptions):
             status = rng.choices([s for s, _ in statuses], [w for _, w in statuses])[0]
-            out.append(
-                Subscription(
-                    id=self._id("sub"), customer_id=rng.choice(cust_ids),
-                    amount=Money.rupees(rng.choice([199, 299, 499, 799, 1499, 2999])),
-                    rail=rng.choice([Rail.EMANDATE_NACH, Rail.UPI_AUTOPAY]),
-                    mandate_status=status,
-                    next_charge_at=start + timedelta(seconds=rng.random() * (end - start).total_seconds()),
-                    consecutive_failures=0 if status is MandateStatus.ACTIVE else rng.randint(1, 3),
+            rail = rng.choice([Rail.EMANDATE_NACH, Rail.UPI_AUTOPAY])
+            amount = Money.rupees(rng.choice([199, 299, 499, 799, 1499, 2999]))
+            at = start + timedelta(seconds=rng.random() * span)
+            sub = Subscription(
+                id=self._id("sub"), customer_id=rng.choice(cust_ids), amount=amount,
+                rail=rail, mandate_status=status, next_charge_at=at,
+                consecutive_failures=0 if status is MandateStatus.ACTIVE else rng.randint(1, 3),
+            )
+            subs.append(sub)
+
+            issuer = _weighted(rng, self.cfg.issuers)
+            seg_key = {"rail": rail, "issuer": issuer, "bin": None, "acquirer": None}
+            active = [i for i in incidents if i.is_active(at) and i.segment.matches(**seg_key)]
+
+            if status is MandateStatus.ACTIVE:
+                profile = profiles[rail]
+                multiplier = 1.0
+                for inc in active:
+                    multiplier *= inc.success_rate_multiplier
+                u = rng.random()
+                base = profile.base_success_rate
+                success = u < base * multiplier
+                counterfactually_ok = u < base
+                code = None if success else self._decline_for(profile, active, seg_key)
+            else:
+                # A lapsed mandate does not sometimes work. No rate to model.
+                success, counterfactually_ok = False, False
+                code = MANDATE_STATUS_DECLINE[status.value]
+
+            order = Order(id=self._id("order"), customer_id=sub.customer_id,
+                          amount=amount, created_at=at)
+            order.attempts.append(
+                PaymentAttempt(
+                    id=self._id("pay"), order_id=order.id, customer_id=sub.customer_id,
+                    amount=amount, rail=rail, at=at,
+                    status=AttemptStatus.CAPTURED if success else AttemptStatus.FAILED,
+                    issuer=issuer, bin=None, acquirer=None, decline_code=code,
+                    attempt_no=sub.consecutive_failures + 1,
                 )
             )
-        return out
+            orders.append(order)
+            sub.orders.append(order.id)
+            sub_by_order[order.id] = sub.id
+            if not success:
+                sub.consecutive_failures += 1
+
+            if not success and counterfactually_ok:
+                for inc in active:
+                    inc.affected_order_ids.append(order.id)
+                    inc.money_at_risk += amount
+            elif not success:
+                for inc in active:
+                    inc.baseline_failures_in_window += 1
+
+        return subs, orders, sub_by_order
 
     def _invoices(self, start, end) -> list[Invoice]:
         """B2B receivables, aged around the window so some are already overdue."""

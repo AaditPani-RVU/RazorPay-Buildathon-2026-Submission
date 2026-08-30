@@ -96,9 +96,30 @@ def test_both_planner_arms_propose_the_same_actions(seed, runs):
 
 
 @pytest.mark.parametrize("seed", SEEDS)
-def test_the_policed_arm_beats_the_naive_baseline_on_net(seed, runs):
+def test_the_policed_arm_beats_the_naive_baseline_on_keepable_revenue(seed, runs):
+    """Gross recovery is the wrong comparison and this test used to make it.
+
+    The naive arm recovers money by chasing revoked mandates and contacting
+    people it may not contact. A merchant cannot keep that revenue, so
+    crediting it would score the baseline for the exact behaviour the policy
+    engine exists to stop. The comparison is on what survives the rules.
+    """
     _, arms, _ = runs[seed]
-    assert arms["backstop"].ledger.net > arms["naive-retry"].ledger.net
+    assert arms["backstop"].ledger.compliant_net > arms["naive-retry"].ledger.compliant_net
+
+
+@pytest.mark.parametrize("seed", SEEDS)
+def test_the_policed_arm_keeps_everything_it_recovers(seed, runs):
+    _, arms, _ = runs[seed]
+    led = arms["backstop"].ledger
+    assert not led.recovered_in_violation
+    assert led.compliant_recovered == led.recovered
+
+
+@pytest.mark.parametrize("seed", SEEDS)
+def test_the_naive_baseline_recovers_money_it_cannot_keep(seed, runs):
+    _, arms, _ = runs[seed]
+    assert arms["naive-retry"].ledger.recovered_in_violation
 
 
 @pytest.mark.parametrize("seed", SEEDS)

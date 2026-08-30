@@ -7,12 +7,12 @@ from backstop.llm.groq_provider import (
 )
 
 __all__ = [
+    "FAST_MODEL",
+    "REASONING_MODEL",
+    "GroqProvider",
     "LLMClient",
     "LLMError",
     "LLMResponse",
-    "StructuredCallResult",
-    "GroqProvider",
     "ScriptedProvider",
-    "REASONING_MODEL",
-    "FAST_MODEL",
+    "StructuredCallResult",
 ]

@@ -5,10 +5,10 @@ import json
 import pytest
 
 from backstop.detect.correlate import correlate
+from backstop.detect.detector import SegmentKey
 from backstop.detect.multires import MultiResolutionDetector
 from backstop.diagnose.diagnoser import TAXONOMY, Diagnoser
 from backstop.diagnose.evidence import EvidenceBuilder, SegmentObservation
-from backstop.detect.detector import SegmentKey
 from backstop.domain.declines import DeclineCode, RootCause
 from backstop.evaluation import diagnosis_score as ds
 from backstop.llm import LLMClient, ScriptedProvider
@@ -63,7 +63,7 @@ def test_improvement_renders_as_a_positive_delta():
 def test_bundle_carries_healthy_peers(bundles):
     """Healthy peers are what separate a routing fault from an issuer outage.
     Without them a model is guessing."""
-    _, clusters, built = bundles
+    _, _clusters, built = bundles
     acq = next(b for b in built if b.primary.segment.dimension == "acquirer")
     peers = acq.peers_by_dimension["acquirer"]
     assert len(peers) >= 3

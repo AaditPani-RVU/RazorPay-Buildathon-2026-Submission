@@ -22,12 +22,21 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
-from typing import Protocol
+from typing import ClassVar, Protocol
 from zoneinfo import ZoneInfo
 
 from backstop.domain.actions import Action, ActionType
 from backstop.domain.declines import DeclineCode, RetryClass, RootCause
-from backstop.domain.entities import Channel, ContactRecord, Customer, Invoice, Order, utc
+from backstop.domain.entities import (
+    Channel,
+    ContactRecord,
+    Customer,
+    Invoice,
+    MandateStatus,
+    Order,
+    Subscription,
+    utc,
+)
 from backstop.domain.money import Money
 
 IST = ZoneInfo("Asia/Kolkata")
@@ -70,6 +79,7 @@ class PolicyContext:
     customer: Customer | None = None
     order: Order | None = None
     invoice: Invoice | None = None
+    subscription: Subscription | None = None
     contacts: list[ContactRecord] = field(default_factory=list)
     diagnosis: RootCause | None = None
     outage_until: datetime | None = None
@@ -275,6 +285,50 @@ class PromiseToPayRule:
 
 
 @dataclass
+class RevokedMandateRule:
+    """A revoked mandate is a decision, not a lapse.
+
+    Expiry is administrative and asking again is a courtesy. Revocation is the
+    customer switching the payments off on purpose, and an agent that responds
+    by re-requesting authorisation has not recovered revenue -- it has ignored
+    a cancellation. Roughly one in twelve ever comes back, so the expected
+    value does not justify overriding somebody's stated decision either.
+
+    A person may still decide to ask. This rule only refuses to let automation
+    make that call.
+    """
+
+    id: str = "revoked_mandate"
+
+    def check(self, action: Action, ctx: PolicyContext) -> Verdict | None:
+        if action.is_inert:
+            return None
+        revoked = (
+            ctx.subscription is not None
+            and ctx.subscription.mandate_status is MandateStatus.REVOKED
+        ) or ctx.last_decline is DeclineCode.MANDATE_REVOKED
+        if not revoked:
+            return None
+        return Verdict(self.id, Disposition.DENY,
+                       "mandate was revoked by the customer; a person decides whether to ask again")
+
+
+@dataclass
+class CancelledSubscriptionRule:
+    """Nothing is owed on a subscription the customer already ended."""
+
+    id: str = "cancelled_subscription"
+
+    def check(self, action: Action, ctx: PolicyContext) -> Verdict | None:
+        if action.is_inert or ctx.subscription is None:
+            return None
+        if ctx.subscription.cancelled_at is None:
+            return None
+        return Verdict(self.id, Disposition.DENY,
+                       "subscription is cancelled; there is nothing left to collect")
+
+
+@dataclass
 class DiagnosisGateRule:
     """Some causes make re-presenting pointless however healthy the instrument.
 
@@ -285,7 +339,7 @@ class DiagnosisGateRule:
 
     id: str = "diagnosis_gate"
 
-    BLOCKS_CHARGING = {
+    BLOCKS_CHARGING: ClassVar[set[RootCause]] = {
         RootCause.AUTHENTICATION_DROPOFF,
         RootCause.FRAUD_PRESSURE,
         RootCause.INVOICE_DISPUTE,
@@ -374,6 +428,8 @@ DEFAULT_RULES: list[Rule] = [
     FraudBlockRule(),
     DisputeFreezeRule(),
     PromiseToPayRule(),
+    RevokedMandateRule(),
+    CancelledSubscriptionRule(),
     NonRetryableDeclineRule(),
     DiagnosisGateRule(),
     RetryBudgetRule(),

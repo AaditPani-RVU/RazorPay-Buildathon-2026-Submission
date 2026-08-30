@@ -135,16 +135,33 @@ class LLMClient:
             "Output only the JSON object. No prose, no code fences."
         )
         self.stats.calls += 1
-        first = self._complete(instructions, user, target)
         try:
-            return StructuredCallResult(schema.model_validate_json(extract_json(first.text)), False, first.text)
+            first = self._complete(instructions, user, target)
+        except Exception as err:
+            # A provider that is rate limited, down, or unreachable is not a
+            # different kind of problem from one that returns garbage: in both
+            # cases no usable plan came back. Callers already treat LLMError as
+            # "propose nothing", which is the safe default, so a transport
+            # failure must arrive as one rather than escaping the pipeline and
+            # taking the whole run down with it.
+            self.stats.failures += 1
+            raise LLMError(f"{schema.__name__} unavailable: {err}") from err
+
+        try:
+            return StructuredCallResult(
+                schema.model_validate_json(extract_json(first.text)), False, first.text
+            )
         except (ValidationError, ValueError) as err:
             self.stats.repairs += 1
             repair = (
                 f"{user}\n\nYour previous response was rejected:\n{first.text[:2000]}\n\n"
                 f"It failed validation with:\n{err}\n\nReturn only corrected JSON."
             )
-            second = self._complete(instructions, repair, target)
+            try:
+                second = self._complete(instructions, repair, target)
+            except Exception as err2:
+                self.stats.failures += 1
+                raise LLMError(f"{schema.__name__} unavailable during repair: {err2}") from err2
             try:
                 return StructuredCallResult(
                     schema.model_validate_json(extract_json(second.text)), True, second.text

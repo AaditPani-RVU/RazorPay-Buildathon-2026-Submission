@@ -80,9 +80,9 @@ class DiagnosisReport:
         lines = [
             f"accuracy      {self.accuracy:.0%}  ({self.correct}/{self.total})",
             f"unparseable   {self.unparseable}   repairs {self.repairs}",
-            f"confidence    {self.mean_confidence_right:.2f} when right, "
+            (f"confidence    {self.mean_confidence_right:.2f} when right, "
             f"{self.mean_confidence_wrong:.2f} when wrong "
-            f"(gap {self.calibration_gap:+.2f})",
+            f"(gap {self.calibration_gap:+.2f})"),
             f"dangerous     {len(self.dangerous)} retry-class errors",
         ]
         if self.confusions:

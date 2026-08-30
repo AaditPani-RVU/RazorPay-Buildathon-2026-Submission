@@ -100,6 +100,9 @@ class Scenario:
     starts_at: datetime
     ends_at: datetime
     seed: int
+    subscription_by_order: dict[str, str] = field(default_factory=dict)
+    """Which subscription a mandate presentation belongs to. Recovery needs it:
+    re-registering a lapsed mandate acts on the subscription, not the order."""
     recoverability: dict[str, Recoverability] = field(default_factory=dict)
     """Ground truth about what would recover each failed order. Fixed before
     any recovery arm runs, so arms are comparable. Only `execute/` may read it;
@@ -124,12 +127,13 @@ class Scenario:
         captured = sum(1 for o in self.orders if o.is_captured)
         n = len(self.orders)
         overdue = sum(1 for i in self.invoices if not i.is_settled)
+        lapsed = sum(1 for s in self.subscriptions if not s.is_chargeable)
         lines = [
             f"window      : {self.starts_at:%Y-%m-%d %H:%M} -> {self.ends_at:%Y-%m-%d %H:%M} UTC",
             f"orders      : {n}  captured {captured} ({captured / n:.1%})" if n else "orders      : 0",
             f"failed      : {len(self.failed_orders)}",
             f"invoices    : {len(self.invoices)}  unsettled {overdue}",
-            f"subs        : {len(self.subscriptions)}",
+            f"subs        : {len(self.subscriptions)}  lapsed mandates {lapsed}",
             f"at risk     : {self.total_at_risk}",
             f"incidents   : {len(self.incidents)}",
         ]
@@ -187,6 +191,43 @@ DEFAULT_RAILS: list[RailProfile] = [
         },
     ),
 ]
+
+# Mandate rails behave differently enough from one-off payments to need their
+# own profiles. Recurring presentations run against accounts nobody is looking
+# at, so funds failures dominate far more heavily than they do at checkout --
+# there is no customer present to notice a low balance and pay another way.
+MANDATE_RAILS: list[RailProfile] = [
+    RailProfile(
+        rail=Rail.EMANDATE_NACH,
+        volume_share=0.5,
+        base_success_rate=0.85,
+        decline_mix={
+            DeclineCode.MANDATE_INSUFFICIENT_FUNDS: 0.78,
+            DeclineCode.GATEWAY_TIMEOUT: 0.12,
+            DeclineCode.MANDATE_PAUSED: 0.10,
+        },
+    ),
+    RailProfile(
+        rail=Rail.UPI_AUTOPAY,
+        volume_share=0.5,
+        base_success_rate=0.90,
+        decline_mix={
+            DeclineCode.MANDATE_INSUFFICIENT_FUNDS: 0.70,
+            DeclineCode.PSP_UNAVAILABLE: 0.18,
+            DeclineCode.MANDATE_NOT_REGISTERED: 0.12,
+        },
+    ),
+]
+
+#: A mandate that is not active fails deterministically, and the code says why.
+#: There is no rate to model here: a revoked mandate does not sometimes work.
+MANDATE_STATUS_DECLINE: dict[str, DeclineCode] = {
+    "paused": DeclineCode.MANDATE_PAUSED,
+    "expired": DeclineCode.MANDATE_EXPIRED,
+    "revoked": DeclineCode.MANDATE_REVOKED,
+    "not_registered": DeclineCode.MANDATE_NOT_REGISTERED,
+}
+
 
 # Share of volume by issuer, and the BINs each issues.
 DEFAULT_ISSUERS: dict[str, float] = {

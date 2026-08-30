@@ -482,6 +482,25 @@ def stage_policy(scenario: Scenario, pairs) -> None:
 # --------------------------------------------------------------------------
 
 
+def stage_mandates(scenario) -> None:
+    rule("4b. SCAN  recurring revenue at risk")
+    console.print(
+        "[dim]The anomaly detector answers 'did something just break'. That is the wrong\n"
+        "question for most subscription revenue, because the usual failure is a state,\n"
+        "not an event: mandates lapse quietly, one at a time, and nothing ever spikes.\n"
+        "So this is a scan rather than a detector -- walk the book, price the dead\n"
+        "authorisations, rank them. Both paths run; they find different problems.[/dim]\n"
+    )
+    from backstop.detect.mandates import scan
+
+    report = scan(scenario.subscriptions)
+    console.print(report.render())
+    console.print("\n  [dim]worst five:[/dim]")
+    for risk in report.at_risk[:5]:
+        console.print(f"    {risk.describe()}")
+    console.print()
+
+
 def stage_backtest(scenario, *, offline: bool, model: str | None) -> None:
     rule("5. MEASURE  four arms, one batch")
     console.print(
@@ -500,11 +519,9 @@ def stage_backtest(scenario, *, offline: bool, model: str | None) -> None:
 def stage_gaps() -> None:
     rule("NOT BUILT YET")
     console.print(
-        "  [yellow]mandates[/yellow]  subscriptions are generated but nothing charges or detects\n"
-        "            them. Mandate decline codes and a root cause exist; the pipeline\n"
-        "            does not reach them.\n"
         "  [yellow]receivables[/yellow]  invoices have policy rules but no detection, and buyers\n"
         "            have no Customer record, so ConsentRule denies every contact.\n"
+        "            The last of the three revenue surfaces still to be wired.\n"
         "  [yellow]razorpay[/yellow]  execute/ has one simulated backend. A test-mode adapter\n"
         "            drops in behind the same protocol.\n"
     )
@@ -519,7 +536,8 @@ def main() -> None:
     ap.add_argument("--model", default=None, help="override the reasoning model")
     ap.add_argument(
         "--stage", default="all",
-        choices=["all", "detect", "diagnose", "policy", "enforce", "backtest"],
+        choices=["all", "detect", "diagnose", "policy", "mandates", "enforce",
+                 "backtest"],
         help="stop after this stage",
     )
     args = ap.parse_args()
@@ -537,6 +555,9 @@ def main() -> None:
     if args.stage == "policy":
         stage_policy(scenario, [])
         return
+    if args.stage == "mandates":
+        stage_mandates(scenario)
+        return
 
     clusters = stage_detect(scenario)
     if args.stage == "detect":
@@ -547,6 +568,7 @@ def main() -> None:
         return
 
     stage_policy(scenario, pairs)
+    stage_mandates(scenario)
     if args.stage == "enforce":
         return
 

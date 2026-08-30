@@ -74,9 +74,7 @@ class Customer:
             return False
         if channel is Channel.EMAIL and not self.email:
             return False
-        if channel in (Channel.SMS, Channel.WHATSAPP, Channel.VOICE) and not self.phone:
-            return False
-        return True
+        return not (channel in (Channel.SMS, Channel.WHATSAPP, Channel.VOICE) and not self.phone)
 
 
 @dataclass
@@ -292,7 +290,20 @@ class Invoice:
 
 
 __all__ = [
-    "AttemptStatus", "Channel", "ContactOutcome", "ContactRecord", "Customer",
-    "Invoice", "InvoiceStatus", "MandateStatus", "Order", "PaymentAttempt",
-    "PromiseToPay", "Subscription", "new_id", "utc", "replace", "timedelta",
+    "AttemptStatus",
+    "Channel",
+    "ContactOutcome",
+    "ContactRecord",
+    "Customer",
+    "Invoice",
+    "InvoiceStatus",
+    "MandateStatus",
+    "Order",
+    "PaymentAttempt",
+    "PromiseToPay",
+    "Subscription",
+    "new_id",
+    "replace",
+    "timedelta",
+    "utc",
 ]

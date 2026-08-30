@@ -43,7 +43,7 @@ class Settings:
     fast_model: str
 
     @classmethod
-    def load(cls, path: str | Path = ".env") -> "Settings":
+    def load(cls, path: str | Path = ".env") -> Settings:
         load_dotenv(path)
         return cls(
             groq_api_key=os.environ.get("GROQ_API_KEY") or None,

@@ -54,7 +54,7 @@ class RetryClass(StrEnum):
 
 @dataclass(frozen=True)
 class DeclineSpec:
-    code: "DeclineCode"
+    code: DeclineCode
     rail: Rail
     retry_class: RetryClass
     description: str

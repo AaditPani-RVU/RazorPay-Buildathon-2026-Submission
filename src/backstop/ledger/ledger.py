@@ -89,6 +89,31 @@ class RecoveryLedger:
         return self.recovered - self.cost
 
     @property
+    def recovered_in_violation(self) -> Money:
+        """Money taken by actions the rules would have refused.
+
+        Not a credit. An arm that recovers by texting people on the DND
+        registry has not out-performed one that declines to -- it has taken
+        revenue its merchant could not lawfully take, and counting it as a win
+        would make the comparison reward exactly the behaviour the project
+        exists to prevent.
+        """
+        total = Money.zero()
+        for e in self.entries:
+            if e.ruling and e.ruling.disposition is Disposition.DENY:
+                total += e.recovered
+        return total
+
+    @property
+    def compliant_recovered(self) -> Money:
+        """Recovery a merchant could actually keep. The honest comparison."""
+        return self.recovered - self.recovered_in_violation
+
+    @property
+    def compliant_net(self) -> Money:
+        return self.compliant_recovered - self.cost
+
+    @property
     def orders_recovered(self) -> int:
         return sum(
             1 for e in self.entries

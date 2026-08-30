@@ -19,22 +19,22 @@ class Money:
             raise TypeError(f"Money must be integer paise, got {type(self.paise).__name__}")
 
     @classmethod
-    def rupees(cls, amount: float | int) -> "Money":
+    def rupees(cls, amount: float) -> Money:
         """Build from rupees. Rounds half-up to the nearest paisa at the boundary."""
-        return cls(int(round(amount * 100)))
+        return cls(round(amount * 100))
 
     @classmethod
-    def zero(cls) -> "Money":
+    def zero(cls) -> Money:
         return cls(0)
 
-    def __add__(self, other: "Money") -> "Money":
+    def __add__(self, other: Money) -> Money:
         return Money(self.paise + other.paise)
 
-    def __sub__(self, other: "Money") -> "Money":
+    def __sub__(self, other: Money) -> Money:
         return Money(self.paise - other.paise)
 
-    def __mul__(self, factor: float) -> "Money":
-        return Money(int(round(self.paise * factor)))
+    def __mul__(self, factor: float) -> Money:
+        return Money(round(self.paise * factor))
 
     def __bool__(self) -> bool:
         return self.paise != 0

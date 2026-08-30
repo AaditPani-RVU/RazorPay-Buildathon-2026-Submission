@@ -91,7 +91,13 @@ def test_some_invoices_are_settled(scenario):
 
 
 def test_rail_mix_roughly_matches_configuration(scenario):
-    counts = Counter(a.rail for o in scenario.orders for a in o.attempts)
+    # One-off payment rails only. Mandate presentations share the order pool
+    # but are governed by MANDATE_RAILS, so including them would measure the
+    # subscription population rather than the configured checkout mix.
+    payment_rails = {Rail.UPI, Rail.CARD, Rail.NETBANKING}
+    counts = Counter(
+        a.rail for o in scenario.orders for a in o.attempts if a.rail in payment_rails
+    )
     total = sum(counts.values())
     assert 0.50 < counts[Rail.UPI] / total < 0.60
     assert 0.25 < counts[Rail.CARD] / total < 0.35
@@ -110,7 +116,6 @@ def test_determinism_survives_a_fresh_process():
     across runs, which would make eval arms incomparable without ever failing a
     normal test.
     """
-    import hashlib
     import os
     import subprocess
     import sys

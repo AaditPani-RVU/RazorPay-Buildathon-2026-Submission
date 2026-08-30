@@ -32,7 +32,7 @@ from backstop.detect.correlate import RiskCluster
 from backstop.detect.detector import segments_for
 from backstop.diagnose.diagnoser import Diagnosis
 from backstop.domain.actions import Action, ActionType
-from backstop.domain.declines import RetryClass, RootCause
+from backstop.domain.declines import DeclineCode, RetryClass, RootCause
 from backstop.domain.entities import Channel, Order
 from backstop.llm import LLMClient, LLMError
 
@@ -107,13 +107,37 @@ TAIL_PLAYBOOK: dict[RetryClass, tuple[ActionType, float, Channel | None, int]] =
 }
 
 
+#: Mandate failures need their own verbs. A lapsed authorisation is not fixed
+#: by a payment reminder -- the customer has to re-authorise, which is a
+#: different ask with a different success rate. Keyed by code rather than by
+#: retry class because the class cannot tell an expiry from an abandoned OTP.
+MANDATE_PLAYBOOK: dict[DeclineCode, tuple[ActionType, float, Channel | None, int]] = {
+    DeclineCode.MANDATE_EXPIRED: (
+        ActionType.REQUEST_MANDATE_REREGISTRATION, 4.0, Channel.EMAIL, 2),
+    DeclineCode.MANDATE_NOT_REGISTERED: (
+        ActionType.REQUEST_MANDATE_REREGISTRATION, 6.0, Channel.EMAIL, 1),
+    # Revoked is a decision, not a lapse. Recovery hands it to a person rather
+    # than asking a customer to undo something they chose. The policy engine
+    # refuses the alternative anyway; proposing it here would just log a veto.
+    DeclineCode.MANDATE_REVOKED: (
+        ActionType.ESCALATE_TO_HUMAN, 0.0, None, 1),
+    # A pause usually ends on its own. Waiting costs nothing and asking a
+    # customer to un-pause something they just paused rarely lands.
+    DeclineCode.MANDATE_PAUSED: (
+        ActionType.WAIT, 168.0, None, 1),
+}
+
+
 def tail_actions(order: Order) -> list[Action]:
     """Actions for a failure with no diagnosed incident behind it."""
     code = order.last_decline
     last = order.last_attempt
     if code is None or last is None:
         return []
-    kind, delay, channel, attempts = TAIL_PLAYBOOK[code.retry_class]
+    if code in MANDATE_PLAYBOOK:
+        kind, delay, channel, attempts = MANDATE_PLAYBOOK[code]
+    else:
+        kind, delay, channel, attempts = TAIL_PLAYBOOK[code.retry_class]
     out: list[Action] = []
     for n in range(attempts):
         # Spacing widens with each attempt: a failure that survived one retry

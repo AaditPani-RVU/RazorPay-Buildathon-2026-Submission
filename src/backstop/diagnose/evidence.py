@@ -86,11 +86,11 @@ class EvidenceBundle:
     def render(self) -> str:
         """The text a model reasons over. Compact, factual, no leading."""
         lines = [
-            f"INCIDENT WINDOW: {self.starts_at:%Y-%m-%d %H:%M} to {self.ends_at:%H:%M} UTC "
-            f"({self.duration_minutes:.0f} minutes)",
+            (f"INCIDENT WINDOW: {self.starts_at:%Y-%m-%d %H:%M} to {self.ends_at:%H:%M} UTC "
+            f"({self.duration_minutes:.0f} minutes)"),
             f"DETECTED SEGMENT: {self.primary.segment.describe()}",
-            f"  success rate {self.primary.rate:.1%} against {self.primary.reference_rate:.1%} "
-            f"reference ({self.primary.delta_pp:+.1f}pp)",
+            (f"  success rate {self.primary.rate:.1%} against {self.primary.reference_rate:.1%} "
+            f"reference ({self.primary.delta_pp:+.1f}pp)"),
             f"  {self.total_failures} failed attempts, {self.money_at_risk} excess loss",
             "",
             "DECLINE CODES IN THE FAILING SEGMENT:",

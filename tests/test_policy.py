@@ -9,7 +9,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from backstop.domain.actions import Action, ActionType
-from backstop.domain.declines import DeclineCode, Rail, RetryClass, RootCause
+from backstop.domain.declines import DeclineCode, Rail, RootCause
 from backstop.domain.entities import (
     AttemptStatus,
     Channel,
@@ -47,8 +47,8 @@ def make_order(code, amount=2500, recoveries=0):
 
 
 def customer(**kw):
-    base = dict(id="c1", email="a@b.test", phone="+9198",
-                consented_channels={Channel.EMAIL, Channel.SMS})
+    base = {"id": "c1", "email": "a@b.test", "phone": "+9198",
+                "consented_channels": {Channel.EMAIL, Channel.SMS}}
     return Customer(**{**base, **kw})
 
 

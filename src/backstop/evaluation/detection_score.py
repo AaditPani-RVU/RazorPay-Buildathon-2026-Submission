@@ -110,8 +110,8 @@ class DetectionReport:
     def render(self) -> str:
         lines = [
             f"recall     {self.recall:>6.0%}  ({len(self.detected)}/{len(self.incidents)} incidents)",
-            f"precision  {self.precision:>6.0%}  ({len(self.false_positives)} false, "
-            f"{len(self.redundant)} redundant)",
+            (f"precision  {self.precision:>6.0%}  ({len(self.false_positives)} false, "
+            f"{len(self.redundant)} redundant)"),
             f"latency    {self.mean_latency_minutes:>6.0f}m mean to first signal",
             f"money      {self.money_found} found / {self.money_missed} missed",
             "",

@@ -117,6 +117,7 @@ def run_arm(
     """
     engine = PolicyEngine()
     orders = {o.id: o for o in scenario.orders}
+    subs = {s.id: s for s in scenario.subscriptions}
     executor = SimulatedExecutor(
         orders=orders, recoverability=scenario.recoverability
     )
@@ -130,10 +131,12 @@ def run_arm(
     for action in sorted(actions, key=lambda a: utc(a.scheduled_at)):
         order = orders.get(action.subject_id)
         customer = scenario.customers.get(order.customer_id) if order else None
+        sub_id = scenario.subscription_by_order.get(action.subject_id)
         ctx = PolicyContext(
             now=utc(action.scheduled_at),
             customer=customer,
             order=order,
+            subscription=subs.get(sub_id) if sub_id else None,
             contacts=sent.get(action.subject_id, []),
             diagnosis=diagnosis_by_order.get(action.subject_id),
             outage_until=outage_by_order.get(action.subject_id),
@@ -197,12 +200,18 @@ def build_backstop_actions(
         planner = Planner(client)
         builder = EvidenceBuilder(attempts)
 
+        degraded = 0
         for cluster in clusters:
             members = orders_in_cluster(cluster, scenario.orders)
             if not members:
                 continue
             diag = diagnoser.diagnose(builder.build(cluster))
             if not diag.ok:
+                # No diagnosis means no strategy, and these orders fall through
+                # to the tail playbook below. Recovery degrades to the
+                # deterministic path rather than stopping, which is the whole
+                # point of having one.
+                degraded += 1
                 continue
             cause = diag.diagnosis.root_cause
             hold = cluster.ends_at if cause in SELF_HEALING else None
@@ -219,6 +228,8 @@ def build_backstop_actions(
             planned_ids.update(o.id for o in members)
         proposal.llm_calls = client.stats.calls
         proposal.from_model = len(actions)
+        if degraded:
+            proposal.backend += f"  ({degraded} cluster(s) fell back to the tail playbook)"
 
     # The long tail: everything that belonged to no diagnosed incident.
     for order in scenario.failed_orders:
@@ -274,8 +285,8 @@ def run(scenario: Scenario, *, offline: bool, model: str | None) -> list[ArmResu
 def render(scenario: Scenario, arms: list[ArmResult], prop: Proposal) -> None:
     table = Table(show_header=True, header_style="bold", box=None, pad_edge=False)
     table.add_column("arm", no_wrap=True)
-    for col in ("recovered", "net", "orders", "charges", "contacts",
-                "wasted", "burst", "violations"):
+    for col in ("recovered", "of which illegal", "keepable net", "orders",
+                "charges", "contacts", "burst", "violations"):
         table.add_column(col, justify="right", no_wrap=True)
 
     for arm in arms:
@@ -283,14 +294,15 @@ def render(scenario: Scenario, arms: list[ArmResult], prop: Proposal) -> None:
         style = "green" if arm.name == "backstop" else ""
         viol = len(arm.violations)
         viol_txt = f"[green]{viol}[/green]" if viol == 0 else f"[red]{viol}[/red]"
+        illegal = led.recovered_in_violation
         table.add_row(
             f"[{style}]{arm.name}[/{style}]" if style else arm.name,
             led.recovered.format(),
-            led.net.format(),
+            f"[red]{illegal.format()}[/red]" if illegal else "-",
+            led.compliant_net.format(),
             f"{led.orders_recovered:,}",
             f"{led.charges_attempted:,}",
             f"{led.contacts_sent:,}",
-            f"{led.wasted_actions:,}",
             str(led.worst_contact_burst),
             viol_txt,
         )
@@ -301,8 +313,9 @@ def render(scenario: Scenario, arms: list[ArmResult], prop: Proposal) -> None:
         total_at_risk += o.amount_at_risk
     console.print(f"\n  payment value at risk in this batch: {total_at_risk}")
     console.print(
-        "  [dim]cost = net subtracted from recovered; burst = most contacts any one\n"
-        "  subject received; violations = actions that ran which the rules refuse.[/dim]"
+        "  [dim]of which illegal = recovered by actions the rules refuse, so a merchant\n"
+        "  could not keep it. keepable net = the rest, less cost. burst = most contacts\n"
+        "  any one subject received.[/dim]"
     )
 
     naive = next((a for a in arms if a.name == "naive-retry"), None)

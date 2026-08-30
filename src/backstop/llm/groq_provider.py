@@ -73,7 +73,11 @@ class GroqProvider:
                     prompt_tokens=getattr(usage, "prompt_tokens", 0) or 0,
                     completion_tokens=getattr(usage, "completion_tokens", 0) or 0,
                 )
-            except Exception as err:  # rate limits and transient 5xx
+            # Deliberately broad. The SDK raises a different type for rate
+            # limits, timeouts, connection resets and 5xx, and every one of
+            # them is worth one more attempt. Narrowing this to the exceptions
+            # known today means a new SDK error class silently stops retrying.
+            except Exception as err:  # noqa: BLE001
                 last = err
                 if attempt == self.max_retries - 1:
                     break
