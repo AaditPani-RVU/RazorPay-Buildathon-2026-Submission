@@ -5,17 +5,25 @@ printed is computed live from a seeded batch; nothing here is a recorded
 transcript. Ground truth is printed alongside each prediction, so a reader can
 check the pipeline rather than take its word.
 
-    python -m backstop.demo                 # full walkthrough, live model
-    python -m backstop.demo --offline       # no API calls; diagnosis is scripted
-    python -m backstop.demo --stage policy  # just the safety boundary
+    python -m backstop.demo                      # full walkthrough, live model
+    python -m backstop.demo --offline            # no API calls; diagnosis is scripted
+    python -m backstop.demo --stage policy       # just the safety boundary
+    python -m backstop.demo --stage receivables  # just the aged ledger
+    python -m backstop.demo --stage razorpay     # live dispatch, test-mode keys
     python -m backstop.demo --seed 3
 
-The pipeline is Detect -> Diagnose -> Decide -> Enforce -> Execute -> Measure.
-`decide`, `execute` and `measure` are not built yet, so the walkthrough covers
-Detect, Diagnose and Enforce, and says so at the end rather than papering over
-the gap. The Enforce stage is driven by hand-written probes standing in for the
-planner -- clearly labelled as such, because a demo that quietly simulates a
-missing component is worse than no demo.
+The pipeline is Detect -> Diagnose -> Decide -> Enforce -> Execute -> Measure,
+and the walkthrough runs all of it across the three revenue surfaces: payment
+failures, lapsed mandates and overdue receivables. The Execute stage is the
+only one that reaches outside the process: with test-mode keys configured it
+dispatches three permitted actions onto Razorpay's real API, silently, and
+skips itself entirely under --offline.
+
+The Enforce stage is deliberately not driven by the planner. It puts
+hand-written probes through the policy engine instead -- including ones that
+must be refused -- because the guarantee worth watching is that the rules hold
+against *any* proposed action, and a stage that only ever showed the planner's
+own output could not demonstrate that. The probes are labelled as probes.
 """
 
 from __future__ import annotations
@@ -527,6 +535,51 @@ def stage_mandates(scenario) -> None:
     console.print()
 
 
+def stage_receivables(scenario) -> None:
+    rule("4c. AGE  receivables at risk")
+    console.print(
+        "[dim]The third surface, and a third shape of failure. A payment fails as an event.\n"
+        "A mandate fails into a state. A receivable fails by *ageing* -- nothing breaks\n"
+        "and nothing flips, the invoice simply gets older and every week the money is\n"
+        "slightly less likely to arrive. So the output is the aging report a finance\n"
+        "team already reads, and what selects the response is a duration, not a cause.[/dim]\n"
+    )
+    from backstop.detect.receivables import bucket_for, scan
+
+    report = scan(scenario.invoices, scenario.ends_at)
+    console.print(report.render())
+    console.print("\n  [dim]largest five:[/dim]")
+    for risk in report.at_risk[:5]:
+        console.print(f"    {risk.describe()}")
+
+    console.print(
+        "\n  [dim]what collections proposes against that ledger, by aging bracket:[/dim]"
+    )
+    from collections import Counter
+
+    from backstop.decide.planner import receivable_actions
+
+    proposed: Counter[tuple[str, str]] = Counter()
+    for inv in scenario.overdue_invoices:
+        bracket = bucket_for(inv.days_overdue(scenario.ends_at)).value
+        for action in receivable_actions(inv, scenario.ends_at):
+            proposed[(bracket, action.type.value)] += 1
+    notes = {
+        "escalate_to_human": "  [dim]disputed, or old enough that a person decides[/dim]",
+        "wait": "  [dim]the buyer committed to a date; chasing inside it is how they stop[/dim]",
+        "offer_part_payment": "  [dim]the blocker is the balance, not the reminder[/dim]",
+    }
+    for (bracket, kind), n in sorted(proposed.items(), key=lambda kv: -kv[1]):
+        console.print(f"    {bracket:<10} {kind:<28} {n:>5}{notes.get(kind, '')}")
+    console.print(
+        "\n  [dim]Measured in stage 5 on its own row. Credit is incremental here too and\n"
+        "  it bites hardest on this surface: most overdue invoices are paid on the\n"
+        "  buyer's own accounts-payable cycle whether or not anybody chases, and an\n"
+        "  agent that mails them and books the payment has measured the AP cycle.[/dim]"
+    )
+    console.print()
+
+
 def stage_backtest(scenario, *, offline: bool, model: str | None) -> None:
     rule("5. MEASURE  four arms, one batch")
     console.print(
@@ -542,14 +595,183 @@ def stage_backtest(scenario, *, offline: bool, model: str | None) -> None:
     console.print()
 
 
+def stage_razorpay(scenario, *, notify: bool) -> None:
+    """Dispatch a few permitted actions onto Razorpay's real test-mode rails.
+
+    Everything before this stage is a claim about what recovery *would* do.
+    This is the one place the system reaches outside itself, and it is
+    deliberately placed after the policy engine rather than beside it: what
+    hits the API is `ruling.final`, the action as the rules left it, and an
+    action the rules refused makes no network call at all.
+
+    Three actions, one per surface, and no notifications unless asked for.
+    Test mode really delivers, and a walkthrough is not a reason to mail
+    somebody.
+    """
+    rule("6. EXECUTE  the same actions, on Razorpay's test-mode rails")
+
+    from backstop.decide.planner import mandate_actions, receivable_actions, tail_actions
+    from backstop.execute.razorpay import (
+        HttpTransport,
+        RazorpayError,
+        RazorpayExecutor,
+        capabilities,
+    )
+
+    settings = Settings.load()
+    if not settings.has_razorpay:
+        console.print(
+            "  [yellow]RAZORPAY_KEY_ID / RAZORPAY_KEY_SECRET are not set in .env.[/yellow]\n"
+            "  [dim]Everything above this line runs without them; only this stage needs a key.[/dim]\n"
+        )
+        return
+    if not settings.razorpay_is_test_mode:
+        console.print(
+            "  [red]The configured key is not a test key.[/red]\n"
+            "  [dim]The adapter refuses to construct against a live key, on purpose: it\n"
+            "  dispatches payment links at people, and one token in a .env file is all\n"
+            "  that separates a walkthrough from messaging real customers.[/dim]\n"
+        )
+        return
+
+    console.print(
+        "[dim]Nothing reaches this stage that the policy engine did not permit, and what\n"
+        "is sent is the action as the rules left it -- rescheduled, downgraded or\n"
+        "unchanged. A refused action makes no API call at all, which is the property\n"
+        "worth having: the safety boundary is upstream of the network, not a filter\n"
+        "applied to a log afterwards.[/dim]\n"
+    )
+
+    transport = HttpTransport.from_settings(settings)
+    try:
+        console.print("[bold]what this key can reach[/bold]  [dim]GET probes only[/dim]\n")
+        for name, ok, why, err in capabilities(transport):
+            mark = "[green]ok [/green]" if ok else "[yellow]no [/yellow]"
+            note = f"  [dim]{why}[/dim]" if ok else f"  [dim]{why} -- {err}[/dim]"
+            console.print(f"  {mark} {name:<15}{note}")
+        console.print(
+            "\n  [dim]Subscriptions is not enabled on this account and is not needed:\n"
+            "  mandate re-registration goes through subscription_registration, which\n"
+            "  works without it.[/dim]\n"
+        )
+
+        engine = PolicyEngine()
+        now = scenario.ends_at
+        executor = RazorpayExecutor(
+            transport=transport,
+            orders={o.id: o for o in scenario.orders},
+            subscriptions={s.id: s for s in scenario.subscriptions},
+            invoices={i.id: i for i in scenario.invoices},
+            customers=scenario.customers,
+            subscription_by_order=scenario.subscription_by_order,
+            notify=notify,
+        )
+
+        # One candidate stream per surface. The subjects are chosen, the
+        # rulings are not -- the first action the engine actually permits is
+        # the one that gets dispatched, and if a surface has none, it says so.
+        streams = [
+            ("payment", (
+                (a, PolicyContext(now=now, order=o, customer=scenario.customers.get(o.customer_id)))
+                for o in scenario.failed_orders[:400] for a in tail_actions(o)
+            )),
+            ("recurring", (
+                (a, PolicyContext(now=now, subscription=s,
+                                  customer=scenario.customers.get(s.customer_id)))
+                for s in scenario.lapsed_subscriptions[:400]
+                for a in mandate_actions(s, now)
+            )),
+            ("receivable", (
+                (a, PolicyContext(now=now, invoice=i,
+                                  customer=scenario.customers.get(i.buyer_id)))
+                for i in scenario.overdue_invoices[:400] for a in receivable_actions(i, now)
+            )),
+        ]
+
+        console.print("[bold]three permitted actions, one per surface[/bold]\n")
+        dispatched = 0
+        held = 0
+        for surface, candidates in streams:
+            chosen = None
+            for action, ctx in candidates:
+                ruling = engine.evaluate(action, ctx)
+                if action.is_inert:
+                    continue
+                # A live dispatch takes ALLOW and RESCHEDULE only. The backtest
+                # executes REQUIRE_APPROVAL too, and is right to -- there the
+                # question is what recovery is worth if a merchant staffs the
+                # queue. Here there is a real person who has not said yes yet,
+                # and sending anyway would make the approval gate decorative.
+                if ruling.disposition is Disposition.REQUIRE_APPROVAL:
+                    held += 1
+                    continue
+                if ruling.allowed:
+                    chosen = (action, ruling)
+                    break
+            if chosen is None:
+                console.print(f"  [yellow]{surface}[/yellow]  nothing permitted in the sample\n")
+                continue
+
+            action, ruling = chosen
+            final = ruling.final or action
+            style = DISPOSITION_STYLE[ruling.disposition]
+            console.print(f"  [bold]{surface}[/bold]  {final.describe()}")
+            console.print(
+                f"    ruling     [{style}]{ruling.disposition.value.upper()}[/{style}]"
+                f"  [dim]{len(engine.rules)} rules consulted[/dim]"
+            )
+            try:
+                result = executor.execute(final, utc(final.scheduled_at))
+            except RazorpayError as err:
+                console.print(f"    [red]razorpay   {err}[/red]\n")
+                continue
+            colour = "green" if result.outcome.value == "dispatched" else "yellow"
+            console.print(f"    outcome    [{colour}]{result.outcome.value}[/{colour}]")
+            if result.external:
+                console.print(f"    created    {result.external.describe()}")
+            console.print(f"    [dim]{result.detail}[/dim]\n")
+            dispatched += int(result.outcome.value == "dispatched")
+
+        if held:
+            console.print(
+                f"  [magenta]{held} candidate{'s' if held > 1 else ''} held for "
+                "approval and not dispatched[/magenta]\n"
+                "  [dim]The backtest executes those, on the stated assumption that a\n"
+                "  merchant staffs the queue. A live adapter may not make that\n"
+                "  assumption on somebody's behalf: an approval gate that sends while\n"
+                "  it waits is not a gate.[/dim]\n"
+            )
+
+        settled = executor.reconcile()
+        console.print(
+            f"  [bold]reconcile[/bold]  {len(executor.pending)} dispatched, "
+            f"{len(settled)} settled so far"
+        )
+        console.print(
+            "\n  [dim]Zero settled, and that is the correct answer rather than a\n"
+            "  disappointing one. A payment link is paid when a human opens it, so a\n"
+            "  live adapter cannot report recovery synchronously and does not pretend\n"
+            "  to: it reports 'dispatched' and reconciles later. This is exactly why the\n"
+            "  four-arm measurement above runs on the simulator -- reality has no\n"
+            "  counterfactual, and an arm with no counterfactual cannot be scored.[/dim]"
+        )
+        if dispatched and not notify:
+            console.print(
+                "\n  [dim]Nothing was sent to anybody: notifications are off unless\n"
+                "  --notify is passed. The links exist in the dashboard, each tagged\n"
+                "  with the action and subject that created it.[/dim]"
+            )
+    finally:
+        transport.close()
+    console.print()
+
+
 def stage_gaps() -> None:
     rule("NOT BUILT YET")
     console.print(
-        "  [yellow]receivables[/yellow]  invoices have policy rules but no detection, and buyers\n"
-        "            have no Customer record, so ConsentRule denies every contact.\n"
-        "            The last of the three revenue surfaces still to be wired.\n"
-        "  [yellow]razorpay[/yellow]  execute/ has one simulated backend. A test-mode adapter\n"
-        "            drops in behind the same protocol.\n"
+        "  [yellow]webhooks[/yellow]  reconciliation is a poll. Razorpay will push\n"
+        "            payment_link.paid and order.paid, which would close the loop\n"
+        "            without asking.\n"
     )
 
 
@@ -561,9 +783,13 @@ def main() -> None:
     ap.add_argument("--offline", action="store_true", help="no API calls; diagnosis is scripted")
     ap.add_argument("--model", default=None, help="override the reasoning model")
     ap.add_argument(
+        "--notify", action="store_true",
+        help="let the razorpay stage actually send. Test mode really delivers.",
+    )
+    ap.add_argument(
         "--stage", default="all",
-        choices=["all", "detect", "diagnose", "policy", "mandates", "enforce",
-                 "backtest"],
+        choices=["all", "detect", "diagnose", "policy", "mandates", "receivables",
+                 "enforce", "backtest", "razorpay"],
         help="stop after this stage",
     )
     args = ap.parse_args()
@@ -584,6 +810,12 @@ def main() -> None:
     if args.stage == "mandates":
         stage_mandates(scenario)
         return
+    if args.stage == "receivables":
+        stage_receivables(scenario)
+        return
+    if args.stage == "razorpay":
+        stage_razorpay(scenario, notify=args.notify)
+        return
 
     clusters = stage_detect(scenario)
     if args.stage == "detect":
@@ -595,10 +827,13 @@ def main() -> None:
 
     stage_policy(scenario, pairs)
     stage_mandates(scenario)
+    stage_receivables(scenario)
     if args.stage == "enforce":
         return
 
     stage_backtest(scenario, offline=args.offline, model=args.model)
+    if not args.offline:
+        stage_razorpay(scenario, notify=args.notify)
     stage_gaps()
 
 
