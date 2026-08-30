@@ -482,18 +482,31 @@ def stage_policy(scenario: Scenario, pairs) -> None:
 # --------------------------------------------------------------------------
 
 
+def stage_backtest(scenario, *, offline: bool, model: str | None) -> None:
+    rule("5. MEASURE  four arms, one batch")
+    console.print(
+        "[dim]Every arm below faces the same orders and the same latent recoverability,\n"
+        "fixed before any of them ran. The policy engine evaluates every action in\n"
+        "every arm -- the only difference is whether its rulings are obeyed, which is\n"
+        "what makes the violation counts comparable rather than self-reported.[/dim]\n"
+    )
+    from backstop.evaluation.backtest import render, run
+
+    arms, prop = run(scenario, offline=offline, model=model)
+    render(scenario, arms, prop)
+    console.print()
+
+
 def stage_gaps() -> None:
     rule("NOT BUILT YET")
     console.print(
-        "  [yellow]decide/[/yellow]   the planner: diagnosis -> a typed RecoveryPlan.\n"
-        "            Both sides of it are done -- the action catalog and the policy\n"
-        "            engine -- so this is the next piece.\n"
-        "  [yellow]execute/[/yellow]  adapters: simulated rails and Razorpay test mode behind\n"
-        "            one interface.\n"
-        "  [yellow]ledger/[/yellow]   recovery bookkeeping, which feeds the money-recovered figure.\n"
-        "  [yellow]backtest[/yellow]  replay one batch through do-nothing / naive-retry / Backstop\n"
-        "            and report the delta. This is the headline claim and it does\n"
-        "            not exist yet.\n"
+        "  [yellow]mandates[/yellow]  subscriptions are generated but nothing charges or detects\n"
+        "            them. Mandate decline codes and a root cause exist; the pipeline\n"
+        "            does not reach them.\n"
+        "  [yellow]receivables[/yellow]  invoices have policy rules but no detection, and buyers\n"
+        "            have no Customer record, so ConsentRule denies every contact.\n"
+        "  [yellow]razorpay[/yellow]  execute/ has one simulated backend. A test-mode adapter\n"
+        "            drops in behind the same protocol.\n"
     )
 
 
@@ -505,7 +518,8 @@ def main() -> None:
     ap.add_argument("--offline", action="store_true", help="no API calls; diagnosis is scripted")
     ap.add_argument("--model", default=None, help="override the reasoning model")
     ap.add_argument(
-        "--stage", default="all", choices=["all", "detect", "diagnose", "policy"],
+        "--stage", default="all",
+        choices=["all", "detect", "diagnose", "policy", "enforce", "backtest"],
         help="stop after this stage",
     )
     args = ap.parse_args()
@@ -533,6 +547,10 @@ def main() -> None:
         return
 
     stage_policy(scenario, pairs)
+    if args.stage == "enforce":
+        return
+
+    stage_backtest(scenario, offline=args.offline, model=args.model)
     stage_gaps()
 
 

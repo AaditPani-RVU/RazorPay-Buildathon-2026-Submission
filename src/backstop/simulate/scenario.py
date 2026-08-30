@@ -19,6 +19,7 @@ from datetime import datetime
 from backstop.domain.declines import DeclineCode, Rail, RootCause
 from backstop.domain.entities import Customer, Invoice, Order, Subscription
 from backstop.domain.money import Money
+from backstop.simulate.recoverability import Recoverability
 
 
 @dataclass(frozen=True)
@@ -99,6 +100,10 @@ class Scenario:
     starts_at: datetime
     ends_at: datetime
     seed: int
+    recoverability: dict[str, Recoverability] = field(default_factory=dict)
+    """Ground truth about what would recover each failed order. Fixed before
+    any recovery arm runs, so arms are comparable. Only `execute/` may read it;
+    a planner that could see this would be cheating rather than being measured."""
 
     @property
     def failed_orders(self) -> list[Order]:

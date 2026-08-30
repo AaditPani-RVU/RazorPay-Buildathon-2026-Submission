@@ -31,6 +31,7 @@ from backstop.domain.entities import (
     Subscription,
 )
 from backstop.domain.money import Money
+from backstop.simulate import recoverability as recov
 from backstop.simulate.scenario import (
     DEFAULT_ACQUIRERS,
     DEFAULT_ISSUERS,
@@ -284,9 +285,23 @@ class ScenarioGenerator:
 
         subs = self._subscriptions(start, end, cust_ids)
         invoices = self._invoices(start, end)
+
+        # Latent recoverability, drawn once so every backtest arm faces the
+        # same world. An incident-caused failure heals when its incident ends,
+        # which is what makes "wait for the outage to pass" a strategy the
+        # backtest can actually reward rather than merely permit.
+        heals: dict[str, datetime] = {}
+        routing: set[str] = set()
+        for inc in incidents:
+            for oid in inc.affected_order_ids:
+                heals[oid] = inc.ends_at
+                if inc.root_cause is RootCause.GATEWAY_ROUTING_DEGRADATION:
+                    routing.add(oid)
+
         return Scenario(
             customers=customers, orders=orders, subscriptions=subs, invoices=invoices,
             incidents=incidents, starts_at=start, ends_at=end, seed=cfg.seed,
+            recoverability=recov.build(orders, heals, routing, cfg.seed),
         )
 
     def _subscriptions(self, start, end, cust_ids) -> list[Subscription]:

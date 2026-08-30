@@ -34,24 +34,62 @@ Detect  ->  Diagnose  ->  Decide  ->  Enforce  ->  Execute  ->  Measure
 - **Execute** — simulated adapters and Razorpay test-mode APIs behind one interface.
 - **Measure** — replay one labelled batch through three arms and report the delta.
 
+## What it measures
+
+Four arms, one batch, identical latent recoverability fixed before any arm
+runs. The policy engine evaluates every action in every arm; the only
+difference is whether its rulings are obeyed. Seed 1, 140k orders, 14,725
+failures, `openai/gpt-oss-120b`:
+
+| arm | recovered | orders | charges | contacts | wasted | violations |
+|---|---|---|---|---|---|---|
+| do-nothing | ₹0 | 0 | 0 | 0 | 0 | 0 |
+| naive-retry | ₹43,01,596 | 4,576 | 44,175 | 14,725 | 54,324 | **21,734** |
+| planner-unpoliced | ₹53,26,140 | 5,563 | 15,001 | 13,728 | 23,094 | 88 |
+| **backstop** | **₹53,24,544** | 5,562 | 14,995 | 13,644 | 23,077 | **0** |
+
+Three things worth reading off that table.
+
+**Against the realistic alternative**, Backstop recovers ₹10.2L more than naive
+retry while making 66% fewer charge attempts -- and naive breaks 21,734 rules
+doing it, including 600 retries of cards reported stolen.
+
+**The leash is nearly free.** The policed and unpoliced arms run identical
+proposed actions, so their gap is the cost of compliance alone: ₹1,596 out of
+₹53.2L, or 0.03% of recovered revenue, to go from 88 violations to zero.
+
+**It holds when the model gets worse.** Swapping in `openai/gpt-oss-20b` drops
+recovery 0.5% (₹53,00,397) and changes the guarantee not at all -- still zero
+violations. The weak model proposes *worse* actions, including 10 SMS to
+customers on the national DND registry and 49 badly-timed attempts, and the
+engine refuses every one. That is the whole argument: safety that does not
+depend on model quality.
+
+Rates in `simulate/recoverability.py` are stated configuration, not measured
+from Razorpay traffic. Read the table as a comparison under a declared world
+model, not as a forecast.
+
 ## Status
 
-**Built:** the domain model (money, decline taxonomy, entities, typed action
-catalog), a provider-agnostic LLM layer with schema validation and bounded
-repair, a seeded scenario generator with labelled incidents, multi-resolution
-detection with scope correlation, LLM root-cause diagnosis, the policy engine,
-and scoring for detection and diagnosis.
+**Built:** the full payments pipeline, end to end -- domain model, LLM layer,
+seeded generator with labelled incidents, multi-resolution detection with scope
+correlation, LLM diagnosis, the policy engine, the planner, execution, the
+ledger, and the four-arm backtest. 192 tests.
 
-**Not built:** `decide/` (the planner), `execute/` (rail adapters), `ledger/`,
-and the three-arm backtest that produces the money-recovered figure.
+**Not built:** subscriptions are generated but nothing charges or detects
+mandates; receivables have policy rules but no detection, and invoice buyers
+have no `Customer` record so every contact is denied by `ConsentRule`; and
+`execute/` has only the simulated backend, no Razorpay test-mode adapter.
 
 ## Seeing it run
 
 ```bash
-.venv/bin/python -m backstop.demo              # full walkthrough, live model
-.venv/bin/python -m backstop.demo --offline    # no API calls
-.venv/bin/python -m backstop.demo --stage policy   # just the safety boundary
-.venv/bin/python -m backstop.evaluation.bench --seeds 10
+.venv/bin/python -m backstop.demo                    # full walkthrough, live model
+.venv/bin/python -m backstop.demo --offline          # no API calls
+.venv/bin/python -m backstop.demo --stage policy     # just the safety boundary
+.venv/bin/python -m backstop.evaluation.backtest     # the four-arm measurement
+.venv/bin/python -m backstop.evaluation.backtest --model openai/gpt-oss-20b
+.venv/bin/python -m backstop.evaluation.bench --seeds 10   # detection across seeds
 ```
 
 The walkthrough generates a labelled batch, detects and scores against truth,
