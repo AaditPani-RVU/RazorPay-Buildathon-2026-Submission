@@ -323,6 +323,9 @@ class ScenarioGenerator:
             incidents=incidents, starts_at=start, ends_at=end, seed=cfg.seed,
             subscription_by_order=sub_by_order,
             recoverability=recov.build(orders, heals, routing, cfg.seed),
+            # Recurring truth is scanned at the end of the window, because
+            # that is the first moment an agent could have acted on the book.
+            mandate_recovery=recov.build_mandates(subs, end, cfg.seed),
         )
 
     def _subscriptions(self, start, end, cust_ids, incidents):

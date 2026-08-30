@@ -8,7 +8,8 @@ Two backends behind one interface:
 
 *   `SimulatedExecutor` resolves an action against the batch's latent
     recoverability -- ground truth fixed at generation time, identical for
-    every arm of the backtest. This is what makes arms comparable.
+    every arm of the backtest. This is what makes arms comparable. It resolves
+    two surfaces: failed orders, and the mandates behind recurring revenue.
 *   A Razorpay test-mode adapter belongs here too and is not built yet; the
     protocol is shaped so it drops in without the ledger or backtest changing.
 
@@ -25,9 +26,9 @@ from enum import StrEnum
 from typing import Protocol
 
 from backstop.domain.actions import Action, ActionType
-from backstop.domain.entities import Order
+from backstop.domain.entities import Order, Subscription
 from backstop.domain.money import Money
-from backstop.simulate.recoverability import Recoverability
+from backstop.simulate.recoverability import MandateRecovery, Recoverability
 
 
 class Outcome(StrEnum):
@@ -90,6 +91,8 @@ class SimulatedExecutor:
 
     orders: dict[str, Order]
     recoverability: dict[str, Recoverability]
+    subscriptions: dict[str, Subscription] = field(default_factory=dict)
+    mandate_recovery: dict[str, MandateRecovery] = field(default_factory=dict)
     costs: ExecutionCosts = field(default_factory=ExecutionCosts)
     name: str = "simulated"
     settled: set[str] = field(default_factory=set, init=False)
@@ -101,11 +104,14 @@ class SimulatedExecutor:
             return ExecutionResult(action, Outcome.NOT_APPLICABLE, at,
                                    detail=f"{action.type.value} moves no money")
 
+        if action.subject_id in self.subscriptions:
+            return self._execute_mandate(action, at, cost)
+
         order = self.orders.get(action.subject_id)
         rec = self.recoverability.get(action.subject_id)
         if order is None or rec is None:
-            # Receivables and subscriptions have no latent model yet, so they
-            # are reported as no-effect rather than silently counted as wins.
+            # Receivables have no latent model yet, so they are reported as
+            # no-effect rather than silently counted as wins.
             return ExecutionResult(action, Outcome.NO_EFFECT, at, cost=cost,
                                    detail="no latent outcome model for this subject")
 
@@ -133,3 +139,47 @@ class SimulatedExecutor:
         self.settled.add(action.subject_id)
         return ExecutionResult(action, Outcome.RECOVERED, at,
                                recovered=order.amount, cost=cost, detail=why)
+
+    def _execute_mandate(self, action: Action, at: datetime, cost: Money) -> ExecutionResult:
+        """Resolve an action whose subject is a subscription, not an order.
+
+        Two things are different from a payment and both are deliberate.
+
+        A dead mandate cannot be *presented*, so a charging action against one
+        recovers nothing however healthy the instrument behind it -- there is
+        no authorisation to charge against. Only asking the customer to
+        re-register can work.
+
+        And what is credited is the year of billing that re-registration
+        restores, not one charge. A mandate is a stream; pricing the recovery
+        of a stream at one period would understate it by an order of
+        magnitude. Recurring is reported on its own row for exactly this
+        reason: the unit is not the same as a one-off payment's and adding the
+        two together would produce a number that means nothing.
+        """
+        sub = self.subscriptions[action.subject_id]
+        rec = self.mandate_recovery.get(action.subject_id)
+
+        if action.is_charging:
+            return ExecutionResult(action, Outcome.NO_EFFECT, at, cost=cost,
+                                   detail="mandate is not active; there is nothing to present")
+        if rec is None:
+            return ExecutionResult(action, Outcome.NO_EFFECT, at, cost=cost,
+                                   detail="mandate is active; nothing to recover")
+        if action.subject_id in self.settled:
+            return ExecutionResult(action, Outcome.NO_EFFECT, at, cost=cost,
+                                   detail="already re-registered; this action was wasted")
+
+        if not rec.reregisters_at(at):
+            why = (
+                "would have resumed unprompted; chasing recovered nothing extra"
+                if rec.would_reregister and rec.resumes_unprompted
+                else "asked after the customer had stopped paying attention"
+                if rec.would_reregister
+                else "customer would not re-authorise"
+            )
+            return ExecutionResult(action, Outcome.NO_EFFECT, at, cost=cost, detail=why)
+
+        self.settled.add(action.subject_id)
+        return ExecutionResult(action, Outcome.RECOVERED, at, recovered=sub.annual_value,
+                               cost=cost, detail="customer re-authorised the mandate")

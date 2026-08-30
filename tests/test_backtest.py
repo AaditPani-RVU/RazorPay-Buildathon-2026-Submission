@@ -13,6 +13,7 @@ separately by the demo and the backtest's own reporting.
 import pytest
 
 from backstop.evaluation.backtest import run
+from backstop.ledger.ledger import Surface
 from backstop.simulate.generator import SimConfig, generate
 
 SEEDS = [1, 2, 3]
@@ -53,10 +54,19 @@ def test_doing_nothing_recovers_nothing(seed, runs):
 
 @pytest.mark.parametrize("seed", SEEDS)
 def test_recovery_never_exceeds_the_money_that_was_at_risk(seed, runs):
+    """Bounded per surface, not in aggregate.
+
+    The surfaces are denominated differently -- a payment is one amount that
+    did not land, a mandate is a year of billing that stopped -- so a single
+    combined ceiling would be satisfied by a number that means nothing. Each
+    surface is held to its own.
+    """
     scenario, arms, _ = runs[seed]
-    at_risk = sum(o.amount_at_risk.paise for o in scenario.orders)
+    payments_at_risk = sum(o.amount_at_risk.paise for o in scenario.orders)
+    recurring_at_risk = scenario.recurring_at_risk.paise
     for arm in arms.values():
-        assert arm.ledger.recovered.paise <= at_risk
+        assert arm.ledger.on(Surface.PAYMENT).recovered.paise <= payments_at_risk
+        assert arm.ledger.on(Surface.RECURRING).recovered.paise <= recurring_at_risk
 
 
 @pytest.mark.parametrize("seed", SEEDS)

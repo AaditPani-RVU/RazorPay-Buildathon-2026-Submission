@@ -498,6 +498,32 @@ def stage_mandates(scenario) -> None:
     console.print("\n  [dim]worst five:[/dim]")
     for risk in report.at_risk[:5]:
         console.print(f"    {risk.describe()}")
+
+    # What the scan produces is a bill, not a plan. Show the plan too, because
+    # a number nobody acts on is a slide rather than a recovery system.
+    console.print(
+        "\n  [dim]what recovery proposes against that book, by mandate state:[/dim]"
+    )
+    from collections import Counter
+
+    from backstop.decide.planner import mandate_actions
+
+    proposed: Counter[tuple[str, str]] = Counter()
+    for sub in scenario.lapsed_subscriptions:
+        for action in mandate_actions(sub, scenario.ends_at):
+            proposed[(sub.mandate_status.value, action.type.value)] += 1
+    for (status, kind), n in sorted(proposed.items(), key=lambda kv: -kv[1]):
+        note = (
+            "  [dim]a decision, not a lapse -- automation does not re-ask[/dim]"
+            if kind == "escalate_to_human" else ""
+        )
+        console.print(f"    {status:<16} {kind:<32} {n:>5}{note}")
+    console.print(
+        "\n  [dim]The measurement follows in stage 5, on its own row: restoring a mandate\n"
+        "  recovers a year of billing, not one charge, so it is never added to the\n"
+        "  payments number. Credit is incremental only -- a paused mandate that would\n"
+        "  have resumed unprompted counts for nothing.[/dim]"
+    )
     console.print()
 
 

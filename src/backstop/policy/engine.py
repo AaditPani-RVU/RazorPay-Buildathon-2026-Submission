@@ -91,10 +91,23 @@ class PolicyContext:
 
     @property
     def subject_amount(self) -> Money:
+        """What is at stake in the action's subject, for the value rules.
+
+        A subscription is priced over a year rather than per charge, because
+        re-registering a lapsed mandate does not recover one billing period,
+        it restores a stream. Two rules read this and both consequences are
+        intended: chasing a mandate almost always clears the cost floor, and a
+        large mandate is large enough that a person signs off on it.
+
+        Order first: a mandate *presentation* that failed is an order, and the
+        money at stake in retrying that charge is the charge, not the stream.
+        """
         if self.order:
             return self.order.amount
         if self.invoice:
             return self.invoice.outstanding
+        if self.subscription:
+            return self.subscription.annual_value
         return Money.zero()
 
 

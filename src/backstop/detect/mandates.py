@@ -21,7 +21,11 @@ from __future__ import annotations
 from collections import defaultdict
 from dataclasses import dataclass, field
 
-from backstop.domain.entities import MandateStatus, Subscription
+from backstop.domain.entities import (
+    BILLING_PERIODS_PER_YEAR,
+    MandateStatus,
+    Subscription,
+)
 from backstop.domain.money import Money
 
 #: Why each non-active state costs money, and whether the customer can fix it.
@@ -63,11 +67,11 @@ class MandateRisk:
     def annual_value(self) -> Money:
         """What the lapse costs over a year if never fixed.
 
-        Monthly billing is assumed. Recurring revenue has to be priced over a
-        horizon or it looks trivial next to one-off payments: a lapsed ₹499
-        mandate is not a ₹499 problem.
+        Priced by `Subscription.annual_value`, so the scan, the policy
+        engine's value thresholds and the ledger cannot disagree about what a
+        mandate is worth.
         """
-        return self.charge_amount * 12
+        return self.charge_amount * BILLING_PERIODS_PER_YEAR
 
     @property
     def expected_recovery(self) -> Money:

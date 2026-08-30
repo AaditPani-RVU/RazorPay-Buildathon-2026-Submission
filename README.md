@@ -24,9 +24,11 @@ Detect  ->  Diagnose  ->  Decide  ->  Enforce  ->  Execute  ->  Measure
 (stats)     (LLM)         (LLM)       (rules)      (adapter)   (backtest)
 ```
 
-- **Detect** — segmented success-rate anomaly detection, receivables aging,
-  mandate-failure clustering. Deliberately no LLM: statistics are cheaper,
-  faster and more accurate for this, and the money at risk is a number.
+- **Detect** — segmented success-rate anomaly detection for payments, and a
+  lifecycle scan of the mandate book for recurring revenue. Deliberately no
+  LLM: statistics are cheaper, faster and more accurate for this, and the
+  money at risk is a number. (Receivables aging is the missing third; see
+  Status.)
 - **Diagnose** — structured root-cause attribution over an evidence bundle.
   Messy multi-signal attribution is where a model genuinely earns its place.
 - **Decide** — a plan drawn from a typed action catalog, never free text.
@@ -38,8 +40,10 @@ Detect  ->  Diagnose  ->  Decide  ->  Enforce  ->  Execute  ->  Measure
 
 Four arms, one batch, identical latent recoverability fixed before any arm
 runs. The policy engine evaluates every action in every arm; the only
-difference is whether its rulings are obeyed. Seed 1, 140k orders, 14,725
-failures, `openai/gpt-oss-120b`:
+difference is whether its rulings are obeyed. Seed 1, 148k orders, 17,005
+failures, 1,331 lapsed mandates, `openai/gpt-oss-120b`:
+
+**Payments** — one-off checkout failures.
 
 | arm | recovered | of which illegal | keepable net | charges | contacts | violations |
 |---|---|---|---|---|---|---|
@@ -48,9 +52,23 @@ failures, `openai/gpt-oss-120b`:
 | planner-unpoliced | ₹58,34,191 | ₹1,565 | ₹58,03,296 | 16,634 | 15,118 | 100 |
 | **backstop** | **₹58,32,626** | **–** | **₹58,03,689** | 16,027 | 15,018 | **0** |
 
+**Recurring** — mandates that stopped collecting. ₹1,70,30,028 per year was at
+risk across 1,331 lapsed authorisations.
+
+| arm | recovered | of which illegal | keepable net | mandates | contacts | violations |
+|---|---|---|---|---|---|---|
+| do-nothing | ₹0 | – | ₹0 | 0 | 0 | 0 |
+| naive-retry | ₹44,05,644 | ₹1,85,796 | ₹42,13,859 | 363 | 3,993 | **1,847** |
+| planner-unpoliced | ₹42,19,848 | – | ₹42,17,610 | 346 | 1,492 | 0 |
+| **backstop** | **₹42,19,848** | **–** | **₹42,17,610** | 346 | 1,492 | **0** |
+
 *"Of which illegal" is revenue taken by actions the rules refuse — a merchant
 cannot keep it, so crediting it would score the baseline for exactly the
 behaviour the policy engine exists to stop.*
+
+*The two surfaces are tabled apart and never added. A recovered payment is one
+amount that landed; a re-registered mandate is a year of billing restored.
+Summing them would produce a headline nobody could reconcile.*
 
 Three things worth reading off that table.
 
@@ -83,7 +101,7 @@ model, not as a forecast.
 
 Subscriptions fail differently: the usual failure is a *state*, not an event.
 Mandates lapse one at a time, nothing spikes, and an anomaly detector correctly
-reports all clear. So a second path scans the book and prices the dead
+reports all clear. So a third path scans the book and prices the dead
 authorisations:
 
 ```
@@ -100,16 +118,61 @@ expected recovery  ₹60,96,557.76 if all are chased
 The revoked row is the interesting one. Recovery never auto-chases it: somebody
 who cancelled a mandate mostly meant to, and an agent that responds by
 re-requesting authorisation has not recovered revenue, it has ignored a
-cancellation. `revoked_mandate` refuses that and routes it to a person. Naive
-retry attempts it 1,524 times.
+cancellation. The planner routes all 381 to a person, and `revoked_mandate`
+stands behind it as the guarantee. Naive retry re-asks them 2,667 times.
+
+Three decisions make that recurring table honest, and each one costs the
+number something.
+
+**A restored mandate is credited a year, not a charge.** Re-registering an
+authorisation does not recover one ₹499 billing period, it restores the
+stream. Everything that reasons about a mandate prices it the same way — the
+risk scan, the policy engine's value thresholds, and the ledger — so the
+engine cannot be deciding about one number while the ledger reports another.
+
+**Recovery is a delta, not a total.** A third of paused mandates resume with
+no prompting at all. An agent that mails those customers and books the
+resumption has measured its own postage, so the ground truth marks them
+non-incremental and they are credited nothing however well the contact is
+timed. This is the single largest downward pressure on the recurring figure
+and it is deliberate.
+
+**The world does not run on the agent's estimate.** The ~42%/~55%/~8%
+re-registration odds above are what Backstop *believes* and reports with.
+`simulate/recoverability.py` holds separate, deliberately different rates for
+what actually happens. Grading the agent against its own assumption would make
+the recurring result a tautology.
+
+The comparison that comes out of it is sharper than a bigger number would
+have been. Naive chasing recovers ₹44,05,644, of which ₹1,85,796 was taken by
+actions the rules refuse. What is left — ₹42,19,848 — is *exactly* what
+Backstop recovers, to the rupee.
+
+That is not a coincidence and it is the point. Re-registration is drawn once
+per customer, so asking three times does not buy three chances; both arms
+reach every mandate they are allowed to reach, inside the window where the
+customer is still listening. Naive's extra 2,501 contacts buy nothing at all.
+So on the recurring surface **the policy engine costs zero revenue and saves
+63% of the contacts**, and the only thing separating the arms is 1,847 broken
+rules. It holds across seeds: over six, Backstop is ahead on keepable revenue
+by ₹3,753–₹4,022 every time — a margin which is, almost exactly, the postage
+naive wasted.
+
+The policed and unpoliced recurring arms are *identical*, which is the result
+worth reading. The mandate playbook proposes nothing the engine refuses: it
+routes revoked authorisations to a human before the rule has anything to
+catch. The engine is still the guarantee — but a planner that constantly
+proposed vetoed work would be a planner that turned dangerous the moment
+somebody ran it unpoliced, and this one does not.
 
 ## Status
 
-**Built:** payments and subscriptions, end to end -- domain model, LLM layer,
-seeded generator with labelled incidents, multi-resolution detection with scope
-correlation, mandate lifecycle scanning, LLM diagnosis, a 15-rule policy
-engine, the planner, execution, the ledger, and the four-arm backtest. 222
-tests, and the repo is lint clean.
+**Built:** payments and subscriptions, end to end and both *measured* --
+domain model, LLM layer, seeded generator with labelled incidents,
+multi-resolution detection with scope correlation, mandate lifecycle scanning
+and its recovery playbook, LLM diagnosis, a 15-rule policy engine, the
+planner, execution, the ledger, and the four-arm backtest across two revenue
+surfaces. 242 tests, and the repo is lint clean.
 
 **Not built:** receivables are the last of the three revenue surfaces -- they
 have policy rules but no detection, and invoice buyers have no `Customer`

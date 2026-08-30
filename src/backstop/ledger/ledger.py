@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass, field
+from enum import StrEnum
 
 from backstop.domain.actions import Action, ActionType
 from backstop.domain.money import Money
@@ -21,10 +22,26 @@ from backstop.execute.executor import ExecutionResult, Outcome
 from backstop.policy.engine import Disposition, PolicyContext, PolicyEngine, Ruling
 
 
+class Surface(StrEnum):
+    """Which revenue surface an action was working on.
+
+    Recorded per entry rather than inferred from an id prefix, and reported
+    separately rather than summed, because the surfaces are not denominated in
+    the same thing. A recovered payment is one amount that landed; a
+    re-registered mandate is a year of billing restored. Adding them would
+    produce a headline number that no merchant could reconcile.
+    """
+
+    PAYMENT = "payment"
+    RECURRING = "recurring"
+    RECEIVABLE = "receivable"
+
+
 @dataclass
 class LedgerEntry:
     action: Action
     """The action as proposed, before any rule touched it."""
+    surface: Surface = Surface.PAYMENT
     ruling: Ruling | None = None
     """None when the arm ran without a policy engine."""
     execution: ExecutionResult | None = None
@@ -50,6 +67,7 @@ class Violation:
     action: Action
     rule_id: str
     reason: str
+    surface: Surface = Surface.PAYMENT
 
 
 @dataclass
@@ -59,6 +77,21 @@ class RecoveryLedger:
 
     def record(self, entry: LedgerEntry) -> None:
         self.entries.append(entry)
+
+    def on(self, surface: Surface) -> RecoveryLedger:
+        """A view of one revenue surface, answering every question this ledger
+        does. Reporting reads surfaces through this rather than through
+        separate counters, so a per-surface number and a total can never be
+        computed two different ways."""
+        return RecoveryLedger(
+            arm=self.arm, entries=[e for e in self.entries if e.surface is surface]
+        )
+
+    @property
+    def surfaces(self) -> list[Surface]:
+        """Surfaces this arm actually touched, in declaration order."""
+        seen = {e.surface for e in self.entries}
+        return [s for s in Surface if s in seen]
 
     # -- what happened -----------------------------------------------------
 

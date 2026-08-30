@@ -44,6 +44,8 @@ from backstop.decide.planner import (
     Planner,
     RecoveryStrategy,
     expand,
+    mandate_actions,
+    naive_mandate_chase,
     naive_retry,
     orders_in_cluster,
     tail_actions,
@@ -57,7 +59,7 @@ from backstop.domain.declines import RootCause
 from backstop.domain.entities import ContactRecord, new_id, utc
 from backstop.domain.money import Money
 from backstop.execute.executor import SimulatedExecutor
-from backstop.ledger.ledger import LedgerEntry, RecoveryLedger, Violation
+from backstop.ledger.ledger import LedgerEntry, RecoveryLedger, Surface, Violation
 from backstop.llm import GroqProvider, LLMClient, ScriptedProvider
 from backstop.policy.engine import Disposition, PolicyContext, PolicyEngine
 from backstop.simulate.generator import SimConfig, generate
@@ -75,6 +77,8 @@ class Proposal:
     """Actions expanded from an LLM strategy for a diagnosed incident."""
     from_tail: int = 0
     """Actions from the deterministic playbook, for failures with no incident."""
+    from_mandates: int = 0
+    """Actions from the mandate scan, for recurring revenue that stopped."""
     diagnosis_by_order: dict[str, RootCause] = field(default_factory=dict)
     outage_by_order: dict[str, datetime] = field(default_factory=dict)
     llm_calls: int = 0
@@ -119,7 +123,10 @@ def run_arm(
     orders = {o.id: o for o in scenario.orders}
     subs = {s.id: s for s in scenario.subscriptions}
     executor = SimulatedExecutor(
-        orders=orders, recoverability=scenario.recoverability
+        orders=orders,
+        recoverability=scenario.recoverability,
+        subscriptions=subs,
+        mandate_recovery=scenario.mandate_recovery,
     )
     ledger = RecoveryLedger(arm=name)
     violations: list[Violation] = []
@@ -129,14 +136,25 @@ def run_arm(
     sent: dict[str, list[ContactRecord]] = {}
 
     for action in sorted(actions, key=lambda a: utc(a.scheduled_at)):
+        # An action's subject is either a failed order or, on the recurring
+        # surface, the subscription itself: re-registering a lapsed mandate
+        # acts on the authorisation, not on any one presentation of it.
+        subject_sub = subs.get(action.subject_id)
         order = orders.get(action.subject_id)
-        customer = scenario.customers.get(order.customer_id) if order else None
-        sub_id = scenario.subscription_by_order.get(action.subject_id)
+        if subject_sub is not None:
+            surface = Surface.RECURRING
+            customer = scenario.customers.get(subject_sub.customer_id)
+            subscription = subject_sub
+        else:
+            surface = Surface.PAYMENT
+            customer = scenario.customers.get(order.customer_id) if order else None
+            sub_id = scenario.subscription_by_order.get(action.subject_id)
+            subscription = subs.get(sub_id) if sub_id else None
         ctx = PolicyContext(
             now=utc(action.scheduled_at),
             customer=customer,
             order=order,
-            subscription=subs.get(sub_id) if sub_id else None,
+            subscription=subscription,
             contacts=sent.get(action.subject_id, []),
             diagnosis=diagnosis_by_order.get(action.subject_id),
             outage_until=outage_by_order.get(action.subject_id),
@@ -144,25 +162,29 @@ def run_arm(
         ruling = engine.evaluate(action, ctx)
 
         if enforce and not ruling.allowed:
-            ledger.record(LedgerEntry(action=action, ruling=ruling, execution=None))
+            ledger.record(
+                LedgerEntry(action=action, surface=surface, ruling=ruling, execution=None)
+            )
             continue
 
         final = (ruling.final if enforce else None) or action
         at = utc(final.scheduled_at)
         result = executor.execute(final, at)
-        ledger.record(LedgerEntry(action=final, ruling=ruling, execution=result))
+        ledger.record(
+            LedgerEntry(action=final, surface=surface, ruling=ruling, execution=result)
+        )
 
         if ruling.disposition is Disposition.DENY:
             for v in ruling.verdicts:
                 if v.disposition is Disposition.DENY:
-                    violations.append(Violation(final, v.rule_id, v.reason))
+                    violations.append(Violation(final, v.rule_id, v.reason, surface))
                     break
 
         if final.is_contact and final.channel:
             sent.setdefault(final.subject_id, []).append(
                 ContactRecord(
                     id=new_id("contact"),
-                    customer_id=order.customer_id if order else "",
+                    customer_id=customer.id if customer else "",
                     channel=final.channel,
                     at=at,
                     subject_ref=final.subject_id,
@@ -237,6 +259,13 @@ def build_backstop_actions(
             actions.extend(tail_actions(order))
     proposal.from_tail = len(actions) - proposal.from_model
 
+    # The recurring surface. Not an incident and not a failed order: a scan of
+    # the book for authorisations that stopped being able to collect. It runs
+    # whether or not a model was reachable, because nothing here needs one.
+    for sub in scenario.lapsed_subscriptions:
+        actions.extend(mandate_actions(sub, scenario.ends_at))
+    proposal.from_mandates = len(actions) - proposal.from_model - proposal.from_tail
+
     return proposal
 
 
@@ -248,9 +277,15 @@ def run(scenario: Scenario, *, offline: bool, model: str | None) -> list[ArmResu
                 diagnosis_by_order={}, outage_by_order={}),
     ]
 
+    # The naive arm gets the recurring surface too, or the comparison would be
+    # unfair in Backstop's favour: an arm that never touches a book of dead
+    # mandates cannot be criticised for how it touches them.
+    naive_actions = naive_retry(failed) + naive_mandate_chase(
+        scenario.subscriptions, scenario.ends_at
+    )
     with console.status("naive-retry..."):
         arms.append(
-            run_arm("naive-retry", naive_retry(failed), scenario, enforce=False,
+            run_arm("naive-retry", naive_actions, scenario, enforce=False,
                     diagnosis_by_order={}, outage_by_order={})
         )
 
@@ -282,17 +317,20 @@ def run(scenario: Scenario, *, offline: bool, model: str | None) -> list[ArmResu
     return arms, prop
 
 
-def render(scenario: Scenario, arms: list[ArmResult], prop: Proposal) -> None:
+def _arm_table(arms: list[ArmResult], surface: Surface, subject: str) -> Table:
+    """One surface's results. Surfaces are tabled apart rather than summed --
+    a recovered payment and a restored year of billing are not the same unit,
+    and a single total mixing them would mean nothing."""
     table = Table(show_header=True, header_style="bold", box=None, pad_edge=False)
     table.add_column("arm", no_wrap=True)
-    for col in ("recovered", "of which illegal", "keepable net", "orders",
+    for col in ("recovered", "of which illegal", "keepable net", subject,
                 "charges", "contacts", "burst", "violations"):
         table.add_column(col, justify="right", no_wrap=True)
 
     for arm in arms:
-        led = arm.ledger
+        led = arm.ledger.on(surface)
         style = "green" if arm.name == "backstop" else ""
-        viol = len(arm.violations)
+        viol = sum(1 for v in arm.violations if v.surface is surface)
         viol_txt = f"[green]{viol}[/green]" if viol == 0 else f"[red]{viol}[/red]"
         illegal = led.recovered_in_violation
         table.add_row(
@@ -306,7 +344,22 @@ def render(scenario: Scenario, arms: list[ArmResult], prop: Proposal) -> None:
             str(led.worst_contact_burst),
             viol_txt,
         )
-    console.print(table)
+    return table
+
+
+def render(scenario: Scenario, arms: list[ArmResult], prop: Proposal) -> None:
+    console.print("[bold]payments[/bold]  one-off checkout failures\n")
+    console.print(_arm_table(arms, Surface.PAYMENT, "orders"))
+
+    console.print("\n[bold]recurring[/bold]  mandates that stopped collecting\n")
+    console.print(_arm_table(arms, Surface.RECURRING, "mandates"))
+    console.print(
+        "  [dim]recurring recovery is a restored *year* of billing, not one charge, so it\n"
+        "  is reported apart from payments rather than added to them. Credit is\n"
+        "  incremental only: a paused mandate that would have resumed unprompted counts\n"
+        f"  for nothing. {scenario.recurring_at_risk} per year was at risk across "
+        f"{len(scenario.lapsed_subscriptions):,} lapsed mandates.[/dim]"
+    )
 
     total_at_risk = Money.zero()
     for o in scenario.orders:
@@ -322,9 +375,11 @@ def render(scenario: Scenario, arms: list[ArmResult], prop: Proposal) -> None:
     back = next((a for a in arms if a.name == "backstop"), None)
     if naive and back:
         at_risk = total_at_risk.as_rupees or 1.0
+        naive_pay = naive.ledger.on(Surface.PAYMENT).recovered
+        back_pay = back.ledger.on(Surface.PAYMENT).recovered
         console.print(
-            f"  share of it recovered: naive {naive.recovered.as_rupees / at_risk:.1%}, "
-            f"backstop {back.recovered.as_rupees / at_risk:.1%}"
+            f"  share of it recovered: naive {naive_pay.as_rupees / at_risk:.1%}, "
+            f"backstop {back_pay.as_rupees / at_risk:.1%}"
         )
 
     for arm in arms:
@@ -346,11 +401,12 @@ def render(scenario: Scenario, arms: list[ArmResult], prop: Proposal) -> None:
             "  [dim]Both arms below ran the same proposed actions from the same planner.\n"
             "  The only variable is whether the policy engine was obeyed.[/dim]\n"
         )
-        d_money = back.recovered - loose.recovered
-        console.print(
-            f"  recovered   unpoliced {loose.recovered}   policed {back.recovered}   "
-            f"delta {d_money}"
-        )
+        for surface in back.ledger.surfaces:
+            lo, hi = loose.ledger.on(surface), back.ledger.on(surface)
+            console.print(
+                f"  {surface.value:<11} keepable  unpoliced {lo.compliant_net}   "
+                f"policed {hi.compliant_net}   delta {hi.compliant_net - lo.compliant_net}"
+            )
         console.print(
             f"  contacts    unpoliced {loose.ledger.contacts_sent:,}   "
             f"policed {back.ledger.contacts_sent:,}"
@@ -366,7 +422,7 @@ def render(scenario: Scenario, arms: list[ArmResult], prop: Proposal) -> None:
         console.print(
             f"  proposed          {led.proposed:,}   "
             f"[dim]({prop.from_model:,} from the model, {prop.from_tail:,} from the "
-            f"tail playbook)[/dim]"
+            f"tail playbook, {prop.from_mandates:,} from the mandate scan)[/dim]"
         )
         console.print(f"  vetoed            {len(led.vetoed):,}")
         console.print(f"  rescheduled       {len(led.rescheduled):,}")

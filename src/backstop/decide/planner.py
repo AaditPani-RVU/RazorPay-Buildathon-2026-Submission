@@ -1,7 +1,7 @@
 """Turning a diagnosis into proposed actions.
 
-Two paths, because revenue recovery has two shapes and only one of them needs
-a model.
+Three paths, because revenue at risk has three shapes and only one of them
+needs a model.
 
 *   **Incident-driven.** A detected cluster with a diagnosis gets a strategy
     from the LLM: for each class of failure inside it, what to do, when, and
@@ -13,6 +13,12 @@ a model.
     nothing to reason about, so these are handled straight off the decline
     taxonomy. Calling a model 14,000 times to re-derive a lookup table would be
     slower, costlier and less reliable.
+*   **The book.** Lapsed mandates are neither. Nothing broke and nothing was
+    declined -- an authorisation stopped being able to collect, and it stays
+    that way until somebody re-registers it. There is no event to reason about
+    at all, so this is a scan and a lookup. What varies is not what to do but
+    whether it should be done, which is a policy question rather than a
+    planning one.
 
 The model plans per *cluster*, never per order. It proposes a shape; expansion
 to concrete actions is deterministic. Both paths then go through the policy
@@ -33,7 +39,7 @@ from backstop.detect.detector import segments_for
 from backstop.diagnose.diagnoser import Diagnosis
 from backstop.domain.actions import Action, ActionType
 from backstop.domain.declines import DeclineCode, RetryClass, RootCause
-from backstop.domain.entities import Channel, Order
+from backstop.domain.entities import Channel, MandateStatus, Order, Subscription
 from backstop.llm import LLMClient, LLMError
 
 # --------------------------------------------------------------------------
@@ -150,6 +156,78 @@ def tail_actions(order: Order) -> list[Action]:
                 scheduled_at=at,
                 channel=channel,
                 rationale=f"tail playbook for {code.value} ({code.retry_class.value})",
+            )
+        )
+    return out
+
+
+# --------------------------------------------------------------------------
+# The recurring path
+# --------------------------------------------------------------------------
+#
+# Lapsed mandates need a third path, because they are neither an incident nor
+# a failed order. Nothing spiked and nothing was declined -- the authorisation
+# is simply dead, and it will stay dead until somebody re-registers it. There
+# is no evidence bundle to reason over and no judgement call to make, so like
+# the long tail this is a lookup rather than a model call. What varies is not
+# what to do but whether to do it at all, and that is a policy question.
+
+#: What to propose for each mandate state, and how long to leave it first.
+#:
+#: The delays are the interesting column, and they are a genuine trade-off
+#: rather than caution for its own sake. A paused mandate gets three days of
+#: silence first, because a third of them resume unprompted and mailing those
+#: customers spends money to be told something that was going to happen
+#: anyway. But the delay is short, because customers go cold: waiting is only
+#: worth what it saves, and past a few days it costs reach faster than it
+#: saves postage. An expired mandate is chased promptly -- nothing about it
+#: self-corrects -- and gets a second ask, because one email is easy to miss.
+MANDATE_RECOVERY_PLAYBOOK: dict[MandateStatus, tuple[ActionType, float, Channel | None, int]] = {
+    MandateStatus.EXPIRED: (
+        ActionType.REQUEST_MANDATE_REREGISTRATION, 24.0, Channel.EMAIL, 2),
+    MandateStatus.NOT_REGISTERED: (
+        ActionType.REQUEST_MANDATE_REREGISTRATION, 48.0, Channel.EMAIL, 2),
+    MandateStatus.PAUSED: (
+        ActionType.REQUEST_MANDATE_REREGISTRATION, 72.0, Channel.EMAIL, 1),
+    # Not a lapse. A person decides whether to ask somebody who cancelled on
+    # purpose, and the policy engine refuses to let automation make that call
+    # anyway -- so proposing anything else here would be proposing a veto.
+    MandateStatus.REVOKED: (
+        ActionType.ESCALATE_TO_HUMAN, 0.0, None, 1),
+}
+
+#: Days between the two re-registration attempts where there are two.
+#: Recurring recovery is a patient problem: the customer has no deadline, so
+#: neither should the sequence.
+REREGISTRATION_SPACING_DAYS = 9.0
+
+
+def mandate_actions(sub: Subscription, now: datetime) -> list[Action]:
+    """Actions for one mandate that cannot currently collect.
+
+    `now` is when the book was scanned. Unlike a failed payment there is no
+    failure moment to schedule from -- an expired mandate has no event, only a
+    state -- so everything is relative to the scan.
+    """
+    if sub.cancelled_at is not None or sub.is_chargeable:
+        return []
+    plan = MANDATE_RECOVERY_PLAYBOOK.get(sub.mandate_status)
+    if plan is None:
+        return []
+    kind, delay_hours, channel, attempts = plan
+    out: list[Action] = []
+    for n in range(attempts):
+        at = now + timedelta(hours=delay_hours) + timedelta(days=REREGISTRATION_SPACING_DAYS * n)
+        out.append(
+            Action(
+                type=kind,
+                subject_id=sub.id,
+                scheduled_at=at,
+                channel=channel,
+                rationale=(
+                    f"mandate playbook for {sub.mandate_status.value}: "
+                    f"{sub.annual_value} per year cannot be collected"
+                ),
             )
         )
     return out
@@ -298,6 +376,33 @@ def naive_retry(orders: list[Order], *, retries: int = 3, spacing_hours: float =
                 rationale="naive baseline: mail every customer who failed",
             )
         )
+    return out
+
+
+def naive_mandate_chase(
+    subscriptions: list[Subscription], now: datetime, *, contacts: int = 3
+) -> list[Action]:
+    """Chase every lapsed mandate, hard, on the channel that gets answered.
+
+    Again not a strawman: "we have 1,300 dead mandates, mail them all and text
+    the ones who don't reply" is what a growth team ships on a Friday. It does
+    recover money. It also cannot tell a customer who let an authorisation
+    lapse from one who deliberately switched it off, and it re-asks both.
+    """
+    out: list[Action] = []
+    for sub in subscriptions:
+        if sub.is_chargeable:
+            continue
+        for n in range(contacts):
+            out.append(
+                Action(
+                    type=ActionType.REQUEST_MANDATE_REREGISTRATION,
+                    subject_id=sub.id,
+                    scheduled_at=now + timedelta(hours=6 * (n + 1)),
+                    channel=Channel.EMAIL if n == 0 else Channel.SMS,
+                    rationale="naive baseline: re-ask every mandate that stopped collecting",
+                )
+            )
     return out
 
 

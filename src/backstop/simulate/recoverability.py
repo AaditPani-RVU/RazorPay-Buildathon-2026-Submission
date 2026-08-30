@@ -1,4 +1,5 @@
-"""Ground truth about what would actually recover each failed order.
+"""Ground truth about what would actually recover each failed order and each
+lapsed mandate.
 
 This is the crux of the whole measurement claim, so it is worth being blunt
 about what it is. The backtest reports money recovered; that number is only
@@ -27,7 +28,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 from backstop.domain.declines import DeclineCode, RetryClass
-from backstop.domain.entities import Order
+from backstop.domain.entities import MandateStatus, Order, Subscription
 
 #: Probability a retry succeeds *once the underlying blocker has cleared*, and
 #: probability a customer acts on a contact. Keyed by what actually failed.
@@ -152,5 +153,103 @@ def build(
             dunning_deadline=last.at + patience if dun_ok else None,
             # Switching route only helps where the route was the problem.
             route_switch_helps=order.id in routing_caused,
+        )
+    return out
+
+
+# --------------------------------------------------------------------------
+# Recurring revenue
+# --------------------------------------------------------------------------
+
+#: Whether a customer would re-authorise a lapsed mandate if asked.
+#:
+#: These are deliberately *not* `detect.mandates.REREGISTRATION_ODDS`. That
+#: table is the agent's published estimate, the number it reasons and reports
+#: with. This one is what the world actually does. Wiring the agent's belief
+#: into the ground truth would make the eval a tautology -- the agent would be
+#: graded against its own assumption and could never be wrong about it.
+REREGISTRATION_TRUTH: dict[MandateStatus, float] = {
+    MandateStatus.EXPIRED: 0.38,
+    MandateStatus.PAUSED: 0.51,
+    MandateStatus.NOT_REGISTERED: 0.26,
+    MandateStatus.REVOKED: 0.06,
+}
+
+#: Share that come back with no prompting whatsoever.
+#:
+#: This is the counterfactual, and leaving it out is how recurring recovery
+#: gets overstated everywhere. A paused mandate frequently resumes on its own
+#: -- the customer paused for a month and always meant to return. An agent
+#: that mails them and then claims the resumption has recovered nothing; it
+#: has taken credit for something that was going to happen anyway.
+UNPROMPTED_RESUME: dict[MandateStatus, float] = {
+    MandateStatus.EXPIRED: 0.04,
+    MandateStatus.PAUSED: 0.34,
+    MandateStatus.NOT_REGISTERED: 0.0,
+    MandateStatus.REVOKED: 0.0,
+}
+
+#: How long a lapsed-mandate customer stays reachable, in days.
+#:
+#: Wider than the payment dunning window by an order of magnitude, and that
+#: asymmetry is the point: a failed checkout is urgent and goes cold in hours,
+#: whereas somebody whose autopay lapsed has no particular deadline. Recurring
+#: recovery is a slower, more patient problem than payment recovery, and a
+#: policy tuned for one is wrong for the other.
+REREGISTRATION_WINDOW_DAYS: tuple[float, float] = (3.0, 45.0)
+
+
+@dataclass(frozen=True)
+class MandateRecovery:
+    """What would restore one lapsed mandate. Drawn once; identical for all arms."""
+
+    subscription_id: str
+    would_reregister: bool
+    """Whether the customer would re-authorise if asked, once, ever."""
+    resumes_unprompted: bool
+    """Whether they would have come back with no action taken at all."""
+    responsive_until: datetime | None
+    """Last moment a re-registration request still lands."""
+
+    @property
+    def is_incremental(self) -> bool:
+        """Whether chasing this mandate recovers anything a merchant did not
+        already have coming. Recovery is a delta, not a total."""
+        return self.would_reregister and not self.resumes_unprompted
+
+    def reregisters_at(self, at: datetime) -> bool:
+        if not self.is_incremental or self.responsive_until is None:
+            return False
+        return at <= self.responsive_until
+
+
+def build_mandates(
+    subscriptions: list[Subscription], reference: datetime, seed: int
+) -> dict[str, MandateRecovery]:
+    """Assign latent recoverability to every mandate that cannot collect.
+
+    `reference` is the moment the book is scanned; responsiveness is measured
+    from there rather than from each mandate's own lapse date, because that is
+    when an agent could first have acted on any of them.
+
+    Its own RNG stream, for the same reason `build` has one: drawing from the
+    generator's stream would shift every downstream draw and silently move
+    detection numbers that were measured before this existed.
+    """
+    rng = random.Random(seed ^ 0x3A11ED)
+    out: dict[str, MandateRecovery] = {}
+
+    for sub in subscriptions:
+        if sub.cancelled_at is not None or sub.mandate_status is MandateStatus.ACTIVE:
+            continue
+        status = sub.mandate_status
+        would = rng.random() < REREGISTRATION_TRUTH.get(status, 0.2)
+        unprompted = rng.random() < UNPROMPTED_RESUME.get(status, 0.0)
+        patience = timedelta(days=rng.uniform(*REREGISTRATION_WINDOW_DAYS))
+        out[sub.id] = MandateRecovery(
+            subscription_id=sub.id,
+            would_reregister=would,
+            resumes_unprompted=unprompted,
+            responsive_until=reference + patience if would else None,
         )
     return out

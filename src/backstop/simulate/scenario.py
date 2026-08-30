@@ -19,7 +19,7 @@ from datetime import datetime
 from backstop.domain.declines import DeclineCode, Rail, RootCause
 from backstop.domain.entities import Customer, Invoice, Order, Subscription
 from backstop.domain.money import Money
-from backstop.simulate.recoverability import Recoverability
+from backstop.simulate.recoverability import MandateRecovery, Recoverability
 
 
 @dataclass(frozen=True)
@@ -107,6 +107,27 @@ class Scenario:
     """Ground truth about what would recover each failed order. Fixed before
     any recovery arm runs, so arms are comparable. Only `execute/` may read it;
     a planner that could see this would be cheating rather than being measured."""
+    mandate_recovery: dict[str, MandateRecovery] = field(default_factory=dict)
+    """The same, for lapsed mandates: who would re-authorise if asked, who
+    would have come back unprompted, and how long either stays reachable."""
+
+    @property
+    def lapsed_subscriptions(self) -> list[Subscription]:
+        """Mandates that cannot currently collect. Not cancelled -- a customer
+        who ended the subscription is not revenue at risk, they are a customer
+        who left."""
+        return [
+            s for s in self.subscriptions
+            if s.cancelled_at is None and not s.is_chargeable
+        ]
+
+    @property
+    def recurring_at_risk(self) -> Money:
+        """Annualised value of every mandate that cannot collect."""
+        total = Money.zero()
+        for s in self.lapsed_subscriptions:
+            total += s.annual_value
+        return total
 
     @property
     def failed_orders(self) -> list[Order]:

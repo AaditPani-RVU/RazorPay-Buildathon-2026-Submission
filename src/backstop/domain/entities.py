@@ -188,6 +188,11 @@ class Order:
 # --------------------------------------------------------------------------
 
 
+#: Mandates are assumed to bill monthly. One number, one place, because the
+#: detector, the policy engine and the ledger all have to agree on it.
+BILLING_PERIODS_PER_YEAR = 12
+
+
 class MandateStatus(StrEnum):
     ACTIVE = "active"
     PAUSED = "paused"
@@ -218,6 +223,18 @@ class Subscription:
     @property
     def needs_re_registration(self) -> bool:
         return self.mandate_status in (MandateStatus.EXPIRED, MandateStatus.NOT_REGISTERED)
+
+    @property
+    def annual_value(self) -> Money:
+        """What this mandate is worth over a year.
+
+        Recurring revenue has to be priced over a horizon or it looks trivial
+        beside one-off payments: a lapsed ₹499 mandate is not a ₹499
+        problem. Everything that reasons about a subscription -- the risk
+        scan, the policy engine's value thresholds, the ledger -- prices it
+        here, so the three cannot drift apart.
+        """
+        return self.amount * BILLING_PERIODS_PER_YEAR
 
 
 # --------------------------------------------------------------------------
@@ -290,6 +307,7 @@ class Invoice:
 
 
 __all__ = [
+    "BILLING_PERIODS_PER_YEAR",
     "AttemptStatus",
     "Channel",
     "ContactOutcome",
