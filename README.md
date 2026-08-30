@@ -36,8 +36,28 @@ Detect  ->  Diagnose  ->  Decide  ->  Enforce  ->  Execute  ->  Measure
 
 ## Status
 
-Foundations in place: money type, provider-agnostic LLM layer with schema
-validation and bounded repair, Groq backend, scripted offline backend.
+**Built:** the domain model (money, decline taxonomy, entities, typed action
+catalog), a provider-agnostic LLM layer with schema validation and bounded
+repair, a seeded scenario generator with labelled incidents, multi-resolution
+detection with scope correlation, LLM root-cause diagnosis, the policy engine,
+and scoring for detection and diagnosis.
+
+**Not built:** `decide/` (the planner), `execute/` (rail adapters), `ledger/`,
+and the three-arm backtest that produces the money-recovered figure.
+
+## Seeing it run
+
+```bash
+.venv/bin/python -m backstop.demo              # full walkthrough, live model
+.venv/bin/python -m backstop.demo --offline    # no API calls
+.venv/bin/python -m backstop.demo --stage policy   # just the safety boundary
+.venv/bin/python -m backstop.evaluation.bench --seeds 10
+```
+
+The walkthrough generates a labelled batch, detects and scores against truth,
+diagnoses each cluster and scores that, then puts fourteen probe actions
+through the policy engine -- including ones that must be refused. Ground truth
+is printed beside every prediction.
 
 ## Setup
 
