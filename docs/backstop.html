@@ -282,7 +282,7 @@ footer {
       surface it works, and breaks zero rules doing it — because every action it takes is
       ruled on by code, not by a prompt.</p>
     <p class="byline eyebrow">
-      <span>Backstop</span><span>3 revenue surfaces</span><span>16 policy rules</span><span>393 tests</span>
+      <span>Backstop</span><span>3 revenue surfaces</span><span>16 policy rules</span><span>415 tests</span>
     </p>
   </header>
 
@@ -292,9 +292,10 @@ footer {
     <div class="stage"><span class="n">03</span><span class="name">Decide</span><span class="how">LLM</span></div>
     <div class="stage keystone"><span class="n">04</span><span class="name">Enforce</span><span class="how">rules</span></div>
     <div class="stage branch"><span class="n">05</span><span class="name">Approve</span><span class="how">a person</span></div>
-    <div class="stage"><span class="n">06</span><span class="name">Execute</span><span class="how">adapter</span></div>
-    <div class="stage"><span class="n">07</span><span class="name">Reconcile</span><span class="how">webhooks</span></div>
-    <div class="stage"><span class="n">08</span><span class="name">Measure</span><span class="how">backtest</span></div>
+    <div class="stage"><span class="n">06</span><span class="name">Schedule</span><span class="how">a clock</span></div>
+    <div class="stage"><span class="n">07</span><span class="name">Execute</span><span class="how">adapter</span></div>
+    <div class="stage"><span class="n">08</span><span class="name">Reconcile</span><span class="how">webhooks</span></div>
+    <div class="stage"><span class="n">09</span><span class="name">Measure</span><span class="how">backtest</span></div>
   </div>
 
   <section class="col">
@@ -514,16 +515,13 @@ footer {
 
   payment     retry_payment order_000100004cfc2
     ruling    <span style="color:var(--allow)">ALLOW</span>   16 rules consulted
-    outcome   dispatched
-    created   order order_TWCsS24apsObn5
+    scheduled 08-27 11:15 UTC, held until then
 
   receivable  send_dunning inv_000100004e5ea via email
     ruling    <span style="color:var(--allow)">ALLOW</span>   16 rules consulted
-    outcome   dispatched
-    created   payment_link plink_TWCsU2fE3tQfnr
+    scheduled 08-31 12:00 UTC, held until then
 
-  <span class="p">430 candidates held for approval, and queued rather than dropped</span>
-  reconcile   3 dispatched, 0 settled so far</pre>
+  <span class="p">430 candidates held for approval, and queued rather than dropped</span></pre>
     </div>
     <p class="surface-note" style="margin-top:1rem">Zero settled is the correct answer rather
       than a disappointing one.</p>
@@ -561,6 +559,62 @@ footer {
       for idempotency — verb, subject, moment, channel, amount, and deliberately not the
       model’s wording. Re-running a plan finds the request a reviewer has already seen, and
       a model rewording its own justification cannot buy a second ask.</p>
+  </section>
+
+  <hr class="rule-line">
+
+  <section class="col">
+    <h2>A reschedule that nobody honours is a log entry</h2>
+    <p class="lede">Three of the sixteen rules exist mainly to move an action’s
+      moment: quiet hours pushes an SMS out of the night, retry spacing refuses to
+      re-present a card seconds after it declined, and an outage hold defers a charge
+      until the rail recovers.</p>
+    <p>The measurement honoured those times. The live path did not — it dispatched
+      immediately and threw the schedule away, which made <code>RESCHEDULE</code>
+      decorative in the one place it mattered. An engine that moves a 22:30 SMS to
+      09:00, followed by an adapter that sends it at 22:30, has not protected anybody.
+      It has produced a record saying it did.</p>
+    <p><strong>Nothing fires before it is due.</strong> That is the guarantee, and it
+      is the reason there is no <code>flush()</code> and no force argument anywhere on
+      the scheduler: the method that skipped the wait would remove the only thing the
+      component promises.</p>
+    <p><strong>The rules run again when it comes due</strong>, on the queue’s
+      reasoning — the world an action was judged in is not the world it lands in. That
+      is also what makes lateness safe rather than merely tolerated: an action arriving
+      at an awkward hour is pushed again <em>then</em>, instead of squeaking through on
+      yesterday’s verdict.</p>
+    <p><strong>But it cannot be re-held forever.</strong> Something rescheduled again
+      and again is not being carefully timed, it is being chased by a blocker that is
+      not clearing — so after three deferrals it is abandoned and recorded. An
+      unbounded retry loop is the same failure as an unbounded contact loop.
+      And <strong>a missed window is not a licence to fire late</strong>: past a day,
+      an action is dropped as stale, because a retry timed for the hour after a failure
+      is a different act three days later, and a reminder can arrive after the invoice
+      was paid.</p>
+    <div class="run">
+<pre><span class="c">the clock advances — 4 scheduled moments, stepped rather than slept through</span>
+
+  <span style="color:var(--allow)">fired</span>      08-27 11:15  retry_payment order_000100004cfc2
+             created order order_TWCsS24apsObn5
+  <span style="color:var(--allow)">fired</span>      08-31 12:00  send_dunning inv_000100004e5ea
+             created payment_link plink_TWCsU2fE3tQfnr
+  <span style="color:var(--allow)">fired</span>      09-01 00:00  request_mandate_reregistration sub_0001000048737
+  <span style="color:var(--allow)">fired</span>      09-03 00:00  request_mandate_reregistration sub_000100004879a</pre>
+    </div>
+    <p class="surface-note" style="margin-top:1rem">The walkthrough steps the clock to
+      each moment rather than sleeping between them, and says so — the same loop with
+      the waiting taken out. It starts from the earliest scheduled moment rather than
+      from now, because the batch is historical: a plan drawn against it is drawn for
+      moments that have already passed, and reading the clock any other way would
+      report every action as arriving a week late.</p>
+    <p style="margin-top:1.5rem">Wiring this in caught a bug in the approval queue
+      shipped an hour earlier. Letting the candidate scan run to completion — so the
+      queue could see the whole pool rather than only what preceded one dispatch — left
+      a loop variable describing the last candidate instead of the chosen one, so every
+      action was being re-ruled against an unrelated subject. It surfaced as fire-time
+      refusals naming rules that do not depend on the clock at all, which is the kind of
+      wrongness that is only obvious because each refusal has to name the rule that
+      produced it.</p>
   </section>
 
   <hr class="rule-line">
@@ -641,7 +695,7 @@ python -m backstop.demo --stage razorpay</pre>
   <footer>
     <span>Backstop</span>
     <span>Razorpay AI Buildathon 2026</span>
-    <span>393 tests · lint clean</span>
+    <span>415 tests · lint clean</span>
   </footer>
 
 </div>
