@@ -1,0 +1,542 @@
+<title>Backstop</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,400;0,500;0,600;1,6..72,400&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+
+<style>
+:root {
+  --paper:      #F4F6F8;
+  --surface:    #FFFFFF;
+  --surface-2:  #EAEDF1;
+  --ink:        #15181E;
+  --ink-2:      #3C434F;
+  --muted:      #6A7381;
+  --line:       #D5DAE1;
+  --line-soft:  #E3E7EC;
+
+  --allow:      #1C6E47;
+  --deny:       #A82C38;
+  --resched:    #8A5D12;
+  --approval:   #6E3A88;
+
+  --allow-bg:   #E4F0E9;
+  --deny-bg:    #F7E4E6;
+
+  --measure: 68ch;
+  --step--1: clamp(.78rem, .76rem + .12vw, .84rem);
+  --step-0:  clamp(1rem, .97rem + .16vw, 1.08rem);
+  --step-1:  clamp(1.2rem, 1.13rem + .34vw, 1.42rem);
+  --step-2:  clamp(1.55rem, 1.4rem + .72vw, 2.1rem);
+  --step-3:  clamp(2.1rem, 1.75rem + 1.6vw, 3.4rem);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --paper:     #101319;
+    --surface:   #171B22;
+    --surface-2: #1F242D;
+    --ink:       #E8EBEF;
+    --ink-2:     #B7BEC9;
+    --muted:     #838D9B;
+    --line:      #2C333D;
+    --line-soft: #232932;
+
+    --allow:     #5FBE8C;
+    --deny:      #E4707C;
+    --resched:   #D2A24E;
+    --approval:  #B98AD0;
+
+    --allow-bg:  #16291F;
+    --deny-bg:   #2D181C;
+  }
+}
+
+:root[data-theme="dark"] {
+  --paper:     #101319;
+  --surface:   #171B22;
+  --surface-2: #1F242D;
+  --ink:       #E8EBEF;
+  --ink-2:     #B7BEC9;
+  --muted:     #838D9B;
+  --line:      #2C333D;
+  --line-soft: #232932;
+
+  --allow:     #5FBE8C;
+  --deny:      #E4707C;
+  --resched:   #D2A24E;
+  --approval:  #B98AD0;
+
+  --allow-bg:  #16291F;
+  --deny-bg:   #2D181C;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  background: var(--paper);
+  color: var(--ink);
+  font-family: "IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
+  font-size: var(--step-0);
+  line-height: 1.62;
+  -webkit-font-smoothing: antialiased;
+}
+
+.page { max-width: 1080px; margin: 0 auto; padding: 0 clamp(1.1rem, 4vw, 3rem) 6rem; }
+.col  { max-width: var(--measure); }
+
+h1, h2, h3 { font-family: Newsreader, ui-serif, Georgia, serif; text-wrap: balance; margin: 0; }
+p { margin: 0; }
+
+.eyebrow {
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-size: var(--step--1);
+  letter-spacing: .13em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+/* ---------- masthead ---------- */
+
+.masthead {
+  border-bottom: 1px solid var(--line);
+  padding: clamp(3rem, 8vw, 5.5rem) 0 2.4rem;
+  display: flex; flex-direction: column; gap: 1.5rem;
+}
+.masthead h1 {
+  font-size: var(--step-3);
+  font-weight: 600;
+  letter-spacing: -.022em;
+  line-height: 1.02;
+}
+.masthead h1 em {
+  font-style: italic;
+  font-weight: 400;
+  color: var(--deny);
+}
+.standfirst { font-size: var(--step-1); color: var(--ink-2); max-width: 40ch; line-height: 1.45; }
+.byline { display: flex; flex-wrap: wrap; gap: .5rem 1.4rem; }
+
+/* ---------- pipeline: a genuine sequence, so it is numbered ---------- */
+
+.pipeline {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(148px, 1fr));
+  gap: 1px;
+  background: var(--line-soft);
+  border: 1px solid var(--line-soft);
+  margin: 3rem 0;
+}
+.stage { background: var(--surface); padding: 1rem 1.05rem 1.15rem; display: flex; flex-direction: column; gap: .3rem; }
+.stage .n {
+  font-family: "IBM Plex Mono", monospace;
+  font-size: .68rem; letter-spacing: .1em; color: var(--muted);
+}
+.stage .name { font-weight: 600; font-size: .96rem; letter-spacing: -.01em; }
+.stage .how {
+  font-family: "IBM Plex Mono", monospace;
+  font-size: .72rem; color: var(--muted);
+}
+.stage.keystone { background: var(--deny-bg); }
+.stage.keystone .name, .stage.keystone .how { color: var(--deny); }
+
+/* ---------- prose ---------- */
+
+section { padding-top: 3.6rem; }
+section > * + * { margin-top: 1.15rem; }
+h2 {
+  font-size: var(--step-2);
+  font-weight: 500;
+  letter-spacing: -.018em;
+  line-height: 1.14;
+}
+h3 { font-size: var(--step-1); font-weight: 600; letter-spacing: -.012em; }
+.lede { font-size: 1.1em; color: var(--ink-2); }
+a { color: var(--ink); text-underline-offset: 3px; text-decoration-color: var(--line); }
+a:hover { text-decoration-color: var(--deny); }
+a:focus-visible { outline: 2px solid var(--deny); outline-offset: 3px; border-radius: 2px; }
+strong { font-weight: 600; }
+code, .mono { font-family: "IBM Plex Mono", ui-monospace, monospace; font-size: .88em; }
+code { background: var(--surface-2); padding: .1em .34em; border-radius: 3px; }
+
+.rule-line { border: 0; border-top: 1px solid var(--line); margin: 3.6rem 0 0; }
+
+/* ---------- tables ---------- */
+
+.surface { margin-top: 2.4rem; }
+.surface-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: .55rem 1rem; margin-bottom: .35rem; }
+.surface-head h3 { font-size: 1.24rem; }
+.surface-note { color: var(--muted); font-size: var(--step--1); max-width: 62ch; margin-bottom: .9rem; }
+
+.scroller { overflow-x: auto; border: 1px solid var(--line); background: var(--surface); }
+table { border-collapse: collapse; width: 100%; min-width: 660px; }
+caption { text-align: left; padding: 0 0 .5rem; font-size: var(--step--1); color: var(--muted); }
+th, td { padding: .62rem .9rem; text-align: right; white-space: nowrap; }
+th:first-child, td:first-child { text-align: left; }
+thead th {
+  font-family: "IBM Plex Mono", monospace;
+  font-size: .68rem; font-weight: 500; letter-spacing: .07em; text-transform: uppercase;
+  color: var(--muted); border-bottom: 1px solid var(--line); background: var(--surface-2);
+}
+tbody td { border-bottom: 1px solid var(--line-soft); font-variant-numeric: tabular-nums; font-size: .9rem; }
+tbody tr:last-child td { border-bottom: 0; }
+td.arm { font-family: "IBM Plex Mono", monospace; font-size: .84rem; color: var(--ink-2); }
+tr.hero td { background: var(--surface-2); font-weight: 600; }
+tr.hero td.arm { color: var(--ink); font-weight: 600; }
+td.illegal { color: var(--deny); }
+td.viol-bad { color: var(--deny); font-weight: 600; }
+td.viol-ok  { color: var(--allow); font-weight: 600; }
+td.nil { color: var(--muted); }
+
+/* ---------- readings ---------- */
+
+.readings { display: grid; gap: 1px; background: var(--line-soft); border: 1px solid var(--line-soft); margin-top: 2.2rem; }
+.reading { background: var(--surface); padding: 1.5rem clamp(1.1rem, 3vw, 1.9rem); display: flex; flex-direction: column; gap: .5rem; }
+.reading h3 { font-size: 1.1rem; font-family: "IBM Plex Sans", sans-serif; font-weight: 600; letter-spacing: -.008em; }
+.reading p { color: var(--ink-2); font-size: .95rem; max-width: 74ch; }
+
+.figure-row { display: flex; flex-wrap: wrap; gap: 1.6rem 2.6rem; margin-top: .35rem; }
+.figure { display: flex; flex-direction: column; gap: .1rem; }
+.figure .v {
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 1.5rem; font-weight: 500; letter-spacing: -.02em;
+  font-variant-numeric: tabular-nums; line-height: 1.1;
+}
+.figure .k { font-family: "IBM Plex Mono", monospace; font-size: .68rem; letter-spacing: .09em; text-transform: uppercase; color: var(--muted); }
+.figure.bad .v { color: var(--deny); }
+.figure.good .v { color: var(--allow); }
+
+/* ---------- rule roster ---------- */
+
+.roster { display: flex; flex-wrap: wrap; gap: .4rem; margin-top: 1.4rem; }
+.roster span {
+  font-family: "IBM Plex Mono", monospace; font-size: .76rem;
+  border: 1px solid var(--line); background: var(--surface);
+  padding: .24rem .55rem; color: var(--ink-2);
+}
+.roster span.lit { border-color: var(--deny); color: var(--deny); }
+
+/* ---------- ledger arithmetic ---------- */
+
+.arith {
+  border: 1px solid var(--line); background: var(--surface);
+  padding: 1.3rem clamp(1.1rem, 3vw, 1.6rem); margin-top: 1.5rem;
+  display: flex; flex-wrap: wrap; align-items: flex-end; gap: .9rem 1.3rem;
+  font-family: "IBM Plex Mono", monospace; font-variant-numeric: tabular-nums;
+}
+.arith .term { display: flex; flex-direction: column; gap: .15rem; }
+.arith .term .k { font-size: .66rem; letter-spacing: .09em; text-transform: uppercase; color: var(--muted); }
+.arith .term .v { font-size: 1.12rem; }
+.arith .op { font-size: 1.1rem; color: var(--muted); padding-bottom: .1rem; }
+.arith .term.sub .v { color: var(--deny); }
+.arith .term.total .v { font-weight: 600; }
+
+/* ---------- run block ---------- */
+
+.run {
+  border: 1px solid var(--line); background: var(--surface);
+  margin-top: 1.6rem; overflow-x: auto;
+}
+.run pre {
+  margin: 0; padding: 1.2rem clamp(1rem, 3vw, 1.5rem);
+  font-family: "IBM Plex Mono", monospace; font-size: .82rem; line-height: 1.85;
+  color: var(--ink-2);
+}
+.run .c { color: var(--muted); }
+.run .p { color: var(--deny); }
+
+footer {
+  margin-top: 4.5rem; padding-top: 1.6rem; border-top: 1px solid var(--line);
+  color: var(--muted); font-size: var(--step--1); display: flex; flex-wrap: wrap; gap: .5rem 1.6rem;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * { animation-duration: .001ms !important; transition-duration: .001ms !important; }
+}
+</style>
+
+<div class="page">
+
+  <header class="masthead">
+    <p class="eyebrow">Razorpay AI Buildathon 2026 &nbsp;·&nbsp; AI Revenue Recovery</p>
+    <h1>The model proposes,<br>the policy engine <em>disposes</em>.</h1>
+    <p class="standfirst">A revenue-recovery agent that out-earns naive retry on every
+      surface it works, and breaks zero rules doing it — because every action it takes is
+      ruled on by code, not by a prompt.</p>
+    <p class="byline eyebrow">
+      <span>Backstop</span><span>3 revenue surfaces</span><span>16 policy rules</span><span>343 tests</span>
+    </p>
+  </header>
+
+  <div class="pipeline">
+    <div class="stage"><span class="n">01</span><span class="name">Detect</span><span class="how">statistics</span></div>
+    <div class="stage"><span class="n">02</span><span class="name">Diagnose</span><span class="how">LLM</span></div>
+    <div class="stage"><span class="n">03</span><span class="name">Decide</span><span class="how">LLM</span></div>
+    <div class="stage keystone"><span class="n">04</span><span class="name">Enforce</span><span class="how">rules</span></div>
+    <div class="stage"><span class="n">05</span><span class="name">Execute</span><span class="how">adapter</span></div>
+    <div class="stage"><span class="n">06</span><span class="name">Measure</span><span class="how">backtest</span></div>
+  </div>
+
+  <section class="col">
+    <h2>A refusal you can check</h2>
+    <p class="lede">Retry budgets, decline-code rules, contact caps, quiet hours, value
+      thresholds and stopping rules are code, not prompts. Every action an LLM
+      proposes is ruled on before it can execute, and a vetoed action is logged with
+      the rule that fired.</p>
+    <p>That turns “zero policy violations” from an assertion into a statement about a
+      record. It also survives the thing most agent demos quietly depend on — the model
+      being good. Backstop’s guarantee does not.</p>
+    <div class="roster" aria-label="The sixteen policy rules">
+      <span class="lit">fraud_block</span><span class="lit">non_retryable_decline</span><span>retry_budget</span><span>retry_spacing</span><span>contact_consent</span><span>quiet_hours</span><span>contact_frequency</span><span class="lit">contact_fatigue</span><span class="lit">dispute_freeze</span><span>promise_to_pay</span><span class="lit">revoked_mandate</span><span>cancelled_subscription</span><span>diagnosis_gate</span><span>outage_hold</span><span>high_value_approval</span><span>cost_of_recovery</span>
+    </div>
+  </section>
+
+  <hr class="rule-line">
+
+  <section>
+    <div class="col">
+      <h2>Four arms, one batch</h2>
+      <p class="lede">Every arm faces identical orders and identical latent recoverability,
+        fixed before any of them ran. The policy engine evaluates every action in every
+        arm — the only difference is whether its rulings are obeyed, which is what makes
+        the violation counts comparable rather than self-reported.</p>
+      <p class="surface-note" style="margin-top:1.15rem">Seed 1 · 148,000 orders · 17,005
+        failures · 1,331 lapsed mandates · 377 overdue invoices · <code>openai/gpt-oss-20b</code>,
+        deliberately the weaker model.</p>
+    </div>
+
+    <div class="surface">
+      <div class="surface-head"><h3>Payments</h3><span class="eyebrow">one-off checkout failures</span></div>
+      <div class="scroller">
+        <table>
+          <thead><tr><th>arm</th><th>recovered</th><th>of which illegal</th><th>keepable net</th><th>charges</th><th>contacts</th><th>violations</th></tr></thead>
+          <tbody>
+            <tr><td class="arm">do-nothing</td><td class="nil">₹0</td><td class="nil">–</td><td class="nil">₹0</td><td class="nil">0</td><td class="nil">0</td><td class="viol-ok">0</td></tr>
+            <tr><td class="arm">naive-retry</td><td>₹49,16,423</td><td class="illegal">₹49,821</td><td>₹48,20,689</td><td>51,015</td><td>17,005</td><td class="viol-bad">25,312</td></tr>
+            <tr><td class="arm">planner-unpoliced</td><td>₹58,12,106</td><td class="illegal">₹13,540</td><td>₹57,69,575</td><td>16,668</td><td>14,883</td><td class="viol-bad">203</td></tr>
+            <tr class="hero"><td class="arm">backstop</td><td>₹57,96,298</td><td class="nil">–</td><td>₹57,67,780</td><td>15,979</td><td>14,751</td><td class="viol-ok">0</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="surface">
+      <div class="surface-head"><h3>Recurring</h3><span class="eyebrow">mandates that stopped collecting</span></div>
+      <p class="surface-note">₹1,70,30,028 per year was at risk across 1,331 lapsed authorisations.
+        A restored mandate is credited a year of billing, not one charge.</p>
+      <div class="scroller">
+        <table>
+          <thead><tr><th>arm</th><th>recovered</th><th>of which illegal</th><th>keepable net</th><th>mandates</th><th>contacts</th><th>violations</th></tr></thead>
+          <tbody>
+            <tr><td class="arm">do-nothing</td><td class="nil">₹0</td><td class="nil">–</td><td class="nil">₹0</td><td class="nil">0</td><td class="nil">0</td><td class="viol-ok">0</td></tr>
+            <tr><td class="arm">naive-retry</td><td>₹44,05,644</td><td class="illegal">₹1,85,796</td><td>₹42,13,859</td><td>363</td><td>3,993</td><td class="viol-bad">1,899</td></tr>
+            <tr><td class="arm">planner-unpoliced</td><td>₹42,19,848</td><td class="illegal">₹49,140</td><td>₹41,68,470</td><td>346</td><td>1,492</td><td class="viol-bad">20</td></tr>
+            <tr class="hero"><td class="arm">backstop</td><td>₹41,81,472</td><td class="nil">–</td><td>₹41,79,263</td><td>344</td><td>1,473</td><td class="viol-ok">0</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="surface">
+      <div class="surface-head"><h3>Receivables</h3><span class="eyebrow">invoices that were never paid</span></div>
+      <p class="surface-note">₹4,01,69,841 outstanding across 377 overdue invoices — of which
+        only ₹69,06,052 was ever incrementally collectable. The rest arrives on the buyer’s
+        own cycle, or never arrives.</p>
+      <div class="scroller">
+        <table>
+          <thead><tr><th>arm</th><th>recovered</th><th>of which illegal</th><th>keepable net</th><th>invoices</th><th>contacts</th><th>violations</th></tr></thead>
+          <tbody>
+            <tr><td class="arm">do-nothing</td><td class="nil">₹0</td><td class="nil">–</td><td class="nil">₹0</td><td class="nil">0</td><td class="nil">0</td><td class="viol-ok">0</td></tr>
+            <tr><td class="arm">naive-retry</td><td>₹44,40,758</td><td class="illegal">₹82,497</td><td>₹43,56,565</td><td>51</td><td>1,131</td><td class="viol-bad">678</td></tr>
+            <tr><td class="arm">planner-unpoliced</td><td>₹47,27,686</td><td class="illegal">₹36,612</td><td>₹46,90,405</td><td>57</td><td>446</td><td class="viol-bad">18</td></tr>
+            <tr class="hero"><td class="arm">backstop</td><td>₹46,91,074</td><td class="nil">–</td><td>₹46,90,432</td><td>55</td><td>428</td><td class="viol-ok">0</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="col" style="margin-top:2rem">
+      <p class="surface-note"><strong>Two things the columns are doing.</strong>
+        “Of which illegal” is revenue taken by actions the rules refuse — a merchant cannot
+        keep it, so crediting it would score the baseline for exactly the behaviour the
+        policy engine exists to stop. And the three surfaces are tabled apart and never
+        added: a recovered payment is one amount that landed, a re-registered mandate is a
+        year of billing restored, a collected invoice is a balance already owed. Summing
+        them would produce a headline nobody could reconcile.</p>
+    </div>
+
+    <div class="arith" aria-label="How naive retry's payments figure is adjusted">
+      <div class="term"><span class="k">naive recovered</span><span class="v">₹49,16,423</span></div>
+      <span class="op">−</span>
+      <div class="term sub"><span class="k">cannot keep</span><span class="v">₹49,821</span></div>
+      <span class="op">−</span>
+      <div class="term sub"><span class="k">51,015 charges + 17,005 contacts</span><span class="v">₹45,913</span></div>
+      <span class="op">=</span>
+      <div class="term total"><span class="k">keepable net</span><span class="v">₹48,20,689</span></div>
+    </div>
+  </section>
+
+  <hr class="rule-line">
+
+  <section>
+    <div class="col">
+      <h2>Five things worth reading off those tables</h2>
+    </div>
+
+    <div class="readings">
+      <article class="reading">
+        <h3>It beats the realistic alternative, not a strawman</h3>
+        <p>Backstop keeps ₹9.5L more than naive retry on payments while making 69% fewer
+          charge attempts. Naive breaks 27,889 rules across the three surfaces getting
+          its number — including 600 retries of cards reported stolen, 2,667 attempts to
+          chase customers who explicitly revoked their mandate, 93 chases of invoices the
+          buyer is actively disputing, and 84 sent to buyers who had already committed to
+          a payment date.</p>
+        <div class="figure-row">
+          <div class="figure good"><span class="v">−69%</span><span class="k">charge attempts</span></div>
+          <div class="figure bad"><span class="v">27,889</span><span class="k">rules naive breaks</span></div>
+          <div class="figure good"><span class="v">0</span><span class="k">rules Backstop breaks</span></div>
+        </div>
+      </article>
+
+      <article class="reading">
+        <h3>Nobody hears from Backstop more than six times a fortnight</h3>
+        <p>Not per order, not per invoice, not per mandate — per person, across all three
+          surfaces at once. Over six seeds the policed arm’s worst 14-day burst against
+          any one human being is exactly 6, with nobody above it, where naive reaches 15
+          to 18. A customer with a failed order, a lapsed mandate and two overdue invoices
+          is one person, and every per-subject cap can be scrupulously observed while they
+          are written to a dozen times.</p>
+        <div class="figure-row">
+          <div class="figure good"><span class="v">6</span><span class="k">worst burst, policed</span></div>
+          <div class="figure bad"><span class="v">15–18</span><span class="k">worst burst, naive</span></div>
+        </div>
+      </article>
+
+      <article class="reading">
+        <h3>The leash is close to free, and where it is not, the price is stated</h3>
+        <p>The policed and unpoliced arms run identical proposed actions, so the gap
+          between them is the cost of compliance alone. On receivables it is positive —
+          the unpoliced arm takes ₹36,612 it cannot keep and spends more doing it. On
+          recurring it is positive too, ₹10,792. On payments it is negative: policing
+          costs ₹1,795 out of ₹57.7L, or 0.03%.</p>
+      </article>
+
+      <article class="reading">
+        <h3>It holds when the model gets worse</h3>
+        <p>The tables above <em>are</em> the weak model. <code>gpt-oss-20b</code> proposes
+          visibly worse actions — 73 re-presentations of mandates whose diagnosis had
+          already established that re-presenting cannot work, 12 re-asks of customers who
+          revoked their authorisation, SMS dunning where email was the safe channel — and
+          the engine refuses every one. 241 rule breaks in the unpoliced arm, 0 in the
+          policed one. That is the whole argument: safety that does not depend on model
+          quality.</p>
+      </article>
+
+      <article class="reading">
+        <h3>It holds when the model is gone</h3>
+        <p>The Groq quota was exhausted mid-run and every cluster returned a 429. Recovery
+          degraded to the deterministic playbook rather than stopping: still 35,158 actions
+          proposed, still ₹58,30,774 recovered on payments, still zero rules broken. Worth
+          saying plainly — the fallback out-recovered the weak model by about ₹34,000. On
+          failures with no incident to reason about, a lookup table beats a small model.
+          The model earns its place on diagnosis and cluster strategy, and nowhere else.</p>
+      </article>
+    </div>
+  </section>
+
+  <hr class="rule-line">
+
+  <section class="col">
+    <h2>The counterfactual is the hard part</h2>
+    <p class="lede">Most overdue invoices are paid whether or not anybody chases them. An
+      accounts-payable department runs on a cycle; an invoice twelve days late is usually
+      not a collections problem, it is a Tuesday.</p>
+    <p>Of the ₹4.02 crore outstanding, <strong>₹1.92 crore arrives on the buyer’s own cycle
+      with no action at all</strong> and is credited to nobody. Only ₹69,06,052 is
+      incremental — the ceiling on what any collections effort could add. A tool that
+      dunned the whole aged debtors report and booked everything that subsequently arrived
+      would show a spectacular recovery rate having caused almost none of it.</p>
+    <p>The same discipline runs through the other two surfaces. A third of paused mandates
+      resume with no prompting, so an agent that mails those customers and books the
+      resumption has measured its own postage — ground truth marks them non-incremental and
+      they are credited nothing however well the contact is timed. And the ninety-day
+      receivables bracket, where settlement and write-off decisions live, is handed to a
+      person and books nothing at all. Across six seeds that bracket is worth
+      ₹83,267–₹5,16,803 to the naive arm. It is the single largest thing policing costs,
+      and on one seed in six it is enough for naive to come out ahead.</p>
+    <div class="figure-row" style="margin-top:1.6rem">
+      <div class="figure"><span class="v">₹4.02cr</span><span class="k">outstanding</span></div>
+      <div class="figure bad"><span class="v">₹1.92cr</span><span class="k">arrives anyway — credited to nobody</span></div>
+      <div class="figure good"><span class="v">₹69,06,052</span><span class="k">genuinely incremental</span></div>
+    </div>
+  </section>
+
+  <hr class="rule-line">
+
+  <section class="col">
+    <h2>It executes for real</h2>
+    <p class="lede">Behind one protocol sit two backends: the simulator the measurement runs
+      on, and a Razorpay test-mode adapter that really dispatches. Orders for
+      re-presentments, payment links for dunning and part-payment offers, authorisation
+      links for lapsed mandates.</p>
+    <p><strong>A dispatch is not a recovery, and the type system says so.</strong> A payment
+      link is paid when a human opens it, hours or days later and out of band — so a live
+      dispatch reports a fourth outcome, <code>dispatched</code>, and reconciles afterwards.
+      Which is precisely why the adapter cannot run the backtest: the four-arm comparison
+      needs a counterfactual, and reality does not offer one.</p>
+    <p>Two guardrails, written as refusals rather than options. <strong>Live keys are refused
+      outright</strong> — this code dispatches payment links at people, and there is no
+      override flag. <strong>Notifications are off unless asked for</strong>, because test
+      mode really delivers.</p>
+    <div class="run">
+<pre><span class="c">$ python -m backstop.demo --stage razorpay</span>
+
+  payment     retry_payment order_000700000ba31
+    ruling    <span style="color:var(--allow)">ALLOW</span>   16 rules consulted
+    outcome   dispatched
+    created   order order_TW4QagoCn3ZEQp
+
+  receivable  send_dunning inv_000700000df50 via email
+    ruling    <span style="color:var(--allow)">ALLOW</span>   16 rules consulted
+    outcome   dispatched
+    created   payment_link plink_TW4OMNt3c4D5K3
+
+  <span class="p">9 candidates held for approval and not dispatched</span>
+  reconcile   2 dispatched, 0 settled so far</pre>
+    </div>
+    <p class="surface-note" style="margin-top:1rem">Zero settled is the correct answer rather
+      than a disappointing one. An approval gate that sends while it waits is not a gate.</p>
+  </section>
+
+  <hr class="rule-line">
+
+  <section class="col">
+    <h2>What these numbers are not</h2>
+    <p>Recovery rates in <code>simulate/recoverability.py</code> are stated configuration,
+      not measured from Razorpay traffic. No real transaction data exists for this, so the
+      batch is generated — which is what makes the rest checkable: every incident is planted
+      deliberately, so detection and diagnosis are scored against truth rather than against
+      a vibe, and the detector never sees any of it.</p>
+    <p>Read the tables as a comparison under a declared world model, not as a forecast. The
+      agent is also graded against rates deliberately different from the ones it believes,
+      so it cannot mark its own homework.</p>
+    <h3 style="margin-top:2rem">Run it yourself</h3>
+    <div class="run">
+<pre><span class="c"># the full walkthrough, 20 seconds, ground truth beside every prediction</span>
+python -m backstop.demo --offline
+
+<span class="c"># just the safety boundary — fourteen probes, including ones that must be refused</span>
+python -m backstop.demo --stage policy
+
+<span class="c"># the four-arm measurement</span>
+python -m backstop.evaluation.backtest</pre>
+    </div>
+  </section>
+
+  <footer>
+    <span>Backstop</span>
+    <span>Razorpay AI Buildathon 2026</span>
+    <span>343 tests · lint clean</span>
+  </footer>
+
+</div>
