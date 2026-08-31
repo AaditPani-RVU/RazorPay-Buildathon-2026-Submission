@@ -517,7 +517,17 @@ class Ruling:
 
     @property
     def allowed(self) -> bool:
-        return self.disposition in (Disposition.ALLOW, Disposition.REQUIRE_APPROVAL)
+        """Permitted, though not necessarily now. Only a denial is a refusal.
+
+        `RESCHEDULE` belongs here and was missing, which quietly turned the
+        three rules that exist to *move* an action into three more ways of
+        killing it: the backtest skipped anything not `allowed`, so an SMS the
+        engine pushed out of quiet hours was never sent at all rather than
+        sent in the morning. `REQUIRE_APPROVAL` is here for the same reason --
+        a gate is not a refusal -- and the caller distinguishes the two by the
+        disposition, which is what it is for.
+        """
+        return self.disposition is not Disposition.DENY
 
     @property
     def blocking_rule(self) -> str | None:
@@ -525,6 +535,21 @@ class Ruling:
             if v.disposition is Disposition.DENY:
                 return v.rule_id
         return None
+
+    @property
+    def moving_rule(self) -> str | None:
+        """Which rule set the time this action ended up with.
+
+        The latest reschedule wins when several compose, so the rule named
+        here is the one that actually chose the moment. A deferral that could
+        only say "a rule moved it" would be the one disposition in the system
+        that does not name its author.
+        """
+        moves = [v for v in self.verdicts
+                 if v.disposition is Disposition.RESCHEDULE and v.reschedule_to]
+        if not moves:
+            return None
+        return max(moves, key=lambda v: utc(v.reschedule_to)).rule_id
 
     def describe(self) -> str:
         # Show the action as permitted, not as proposed: an audit trail that

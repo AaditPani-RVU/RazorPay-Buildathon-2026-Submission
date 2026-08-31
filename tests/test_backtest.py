@@ -12,8 +12,10 @@ separately by the demo and the backtest's own reporting.
 
 import pytest
 
+from backstop.domain.entities import utc
 from backstop.evaluation.backtest import run
 from backstop.ledger.ledger import Surface
+from backstop.policy.engine import Disposition
 from backstop.simulate.generator import SimConfig, generate
 
 SEEDS = [1, 2, 3]
@@ -146,3 +148,28 @@ def test_every_executed_action_is_recorded_with_a_ruling(seed, runs):
         for entry in arms[name].ledger.executed:
             assert entry.ruling is not None
             assert entry.execution is not None
+
+
+@pytest.mark.parametrize("seed", SEEDS)
+def test_a_rescheduled_action_is_executed_later_rather_than_dropped(seed, runs):
+    """A move is not a refusal, and this arm used to treat it as one.
+
+    Three rules exist mainly to shift an action's moment -- quiet hours, retry
+    spacing, and the outage hold. The enforced arm skipped everything that was
+    not `allowed`, and `allowed` did not include `RESCHEDULE`, so every action
+    those three rules touched was silently dropped instead of being executed
+    at the hour they chose. That made them denials wearing a different label,
+    and understated the policed arm against its own design.
+    """
+    _, arms, _ = runs[seed]
+    policed = arms["backstop"]
+    moved = [
+        entry for entry in policed.ledger.executed
+        if entry.ruling is not None
+        and entry.ruling.disposition is Disposition.RESCHEDULE
+    ]
+    assert moved, "no action was rescheduled in this batch; the test proves nothing"
+    for entry in moved:
+        # Executed at the moment the rules chose, not the one proposed.
+        assert utc(entry.execution.at) == utc(entry.action.scheduled_at)
+        assert utc(entry.action.scheduled_at) != utc(entry.ruling.proposed.scheduled_at)

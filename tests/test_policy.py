@@ -244,3 +244,21 @@ def test_inert_actions_are_always_permitted():
 def test_rule_ids_are_unique():
     ids = [r.id for r in DEFAULT_RULES]
     assert len(ids) == len(set(ids))
+
+
+def test_a_reschedule_is_permission_not_refusal():
+    """`allowed` means "not denied", and a caller that reads it as "dispatch
+    now" would drop every action the three timing rules touch."""
+    r = ENGINE.evaluate(retry(NOW + timedelta(hours=1)),
+                        ctx(order=make_order(DeclineCode.GATEWAY_TIMEOUT),
+                            outage_until=NOW + timedelta(hours=6)))
+    assert r.disposition is Disposition.RESCHEDULE
+    assert r.allowed, "a moved action is permitted, just later"
+    assert r.final is not None
+    assert r.moving_rule == "outage_hold"
+
+
+def test_only_a_denial_is_a_refusal():
+    r = ENGINE.evaluate(retry(), ctx(order=make_order(DeclineCode.STOLEN_OR_LOST_CARD)))
+    assert not r.allowed
+    assert r.moving_rule is None
