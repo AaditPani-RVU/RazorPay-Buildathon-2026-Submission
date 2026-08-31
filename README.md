@@ -21,11 +21,11 @@ assertion.
 ## Pipeline
 
 ```
-Detect -> Diagnose -> Decide -> Enforce -> Execute -> Measure
-(stats)   (LLM)       (LLM)     (rules)    (adapter)  (backtest)
-                                   |          ^
-                                Approve    Reconcile
-                              (a person)   (webhooks)
+Detect -> Diagnose -> Decide -> Enforce -> Schedule -> Execute -> Measure
+(stats)   (LLM)       (LLM)     (rules)    (a clock)   (adapter)  (backtest)
+                                   |                      ^
+                                Approve                Reconcile
+                              (a person)               (webhooks)
 ```
 
 - **Detect** — three scans for three shapes of failure: segmented success-rate
@@ -41,6 +41,9 @@ Detect -> Diagnose -> Decide -> Enforce -> Execute -> Measure
   person. An approval discharges the `require_approval` verdict and nothing
   else; the rules run again at release, and an unanswered request expires
   rather than firing.
+- **Schedule** — each action is held until the moment the rules chose for it,
+  and ruled on again when it gets there. Nothing fires early; nothing fires a
+  day late.
 - **Execute** — two backends behind one protocol: the simulator the measurement
   runs on, and a Razorpay test-mode adapter that really dispatches.
 - **Reconcile** — a dispatch is not a recovery. A signature-verifying webhook
@@ -451,6 +454,53 @@ mandate is a year of billing whichever way the news arrives. Two paths with
 their own opinions would make the recurring number a function of network
 timing.
 
+### Holding a plan across real time
+
+Three rules exist mainly to move an action's `scheduled_at`: `quiet_hours`
+pushes an SMS out of the night, `retry_spacing` refuses to re-present a card
+thirty seconds after it declined, and `outage_hold` defers a charge until a
+degraded rail recovers. The backtest honours those times — it sorts by
+`scheduled_at`, judges each action at its own moment and executes it there.
+The live path did not. It dispatched immediately and threw the schedule away.
+
+That made `RESCHEDULE` decorative in the one place it mattered. An engine that
+moves a 22:30 SMS to 09:00, followed by an adapter that sends it at 22:30, has
+not protected anybody — it has produced a log entry saying it did.
+`schedule/scheduler.py` is what makes the disposition mean something outside
+the simulator, and it holds four properties.
+
+**Nothing fires before it is due.** That is the guarantee. There is no
+`flush()` and no `force` argument, because a method that skipped the wait would
+remove the only thing this component promises.
+
+**The rules run again at fire time**, on the same reasoning as the approval
+queue: the world an action was judged in is not the world it lands in. A
+denial still denies at the later clock. The re-rule is also what makes lateness
+*safe* rather than merely tolerated — an action coming due at an awkward hour is
+pushed again by `quiet_hours` then, rather than squeaking through on yesterday's
+verdict.
+
+**An action can be re-held, but not forever.** If the re-rule moves it again it
+goes back into the queue with the new time rather than firing early or firing
+anyway. Something rescheduled repeatedly is not being carefully timed, it is
+being chased by a blocker that is not clearing — so after three deferrals it is
+abandoned and recorded. An unbounded retry loop is the same failure as an
+unbounded contact loop.
+
+**A missed window is not a licence to fire late.** A process down for a day
+comes back holding actions whose moment has passed, and firing them now is not
+the same act: a retry timed for the hour after a failure is a different thing
+three days later, and a reminder can arrive after the invoice was paid. Past
+twenty-four hours an action is dropped as stale and said to be dropped. That is
+a relevance bound; safety is the re-rule's job.
+
+The walkthrough steps a clock through each scheduled moment rather than
+sleeping between them, and says so — it is the same loop with the waiting taken
+out. It starts from the earliest scheduled moment rather than from `now`
+because the batch is historical, so a plan drawn against it is drawn for
+moments that have already passed; reading the clock any other way would report
+every action as arriving a week late.
+
 ### The restart hole, found by the demo
 
 Building the receiver surfaced a bug in the adapter that had been there since
@@ -481,15 +531,16 @@ receivables aging, a recovery playbook for each surface, LLM diagnosis, a
 per surface, two execution backends behind one protocol -- the simulator that
 the measurement runs on, and a Razorpay test-mode adapter that really
 dispatches -- an approval queue that holds what the engine will not let
-automation decide alone, and a signature-verifying webhook receiver that closes
-the loop without polling. 393 tests, and the repo is lint clean.
+automation decide alone, a scheduler that holds every action until its own
+moment and re-rules it there, and a signature-verifying webhook receiver that
+closes the loop without polling. 415 tests, and the repo is lint clean.
 
-**Not built:** nothing schedules a plan across real time -- the walkthrough
-dispatches immediately, where a deployment would hold each action until its
-`scheduled_at`. And the webhook receiver is exercised against a locally signed
+**Not built:** the webhook receiver is exercised against a locally signed
 delivery, because receiving one from Razorpay needs a public endpoint a
 walkthrough on a laptop does not have; the verification, matching and crediting
-are the real ones, and only the postman is simulated.
+are the real ones, and only the postman is simulated. And the scheduler steps a
+clock rather than sleeping -- a deployment would run the same loop on a timer,
+with the actions persisted rather than held in memory.
 
 ## Seeing it run
 

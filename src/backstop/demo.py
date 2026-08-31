@@ -616,12 +616,12 @@ def stage_razorpay(scenario, *, notify: bool) -> None:
     from backstop.decide.planner import mandate_actions, receivable_actions, tail_actions
     from backstop.execute.razorpay import (
         HttpTransport,
-        RazorpayError,
         RazorpayExecutor,
         capabilities,
         reference_for,
     )
     from backstop.ledger.ledger import Surface
+    from backstop.schedule import Scheduler
 
     settings = Settings.load()
     if not settings.has_razorpay:
@@ -696,8 +696,10 @@ def stage_razorpay(scenario, *, notify: bool) -> None:
         console.print("[bold]three permitted actions, one per surface[/bold]\n")
         dispatched = 0
         queue = ApprovalQueue()
-        # The context each held action was judged in, so a release can be
-        # re-judged against the same subject at a later clock.
+        scheduler = Scheduler()
+        # The context each held or scheduled action was judged in, so it can be
+        # re-judged against the same subject at a later clock. Both the queue's
+        # release and the scheduler's fire-time re-rule read this.
         held_ctx: dict[str, PolicyContext] = {}
         for surface, candidates in streams:
             chosen = None
@@ -722,12 +724,16 @@ def stage_razorpay(scenario, *, notify: bool) -> None:
                     held_ctx[request.id] = ctx
                     continue
                 if ruling.allowed and chosen is None:
-                    chosen = (action, ruling)
+                    # The context travels with the choice. The scan runs to
+                    # exhaustion to fill the approval queue, so the loop
+                    # variable no longer describes the chosen action by the
+                    # time this loop ends.
+                    chosen = (action, ruling, ctx)
             if chosen is None:
                 console.print(f"  [yellow]{surface}[/yellow]  nothing permitted in the sample\n")
                 continue
 
-            action, ruling = chosen
+            action, ruling, chosen_ctx = chosen
             final = ruling.final or action
             style = DISPOSITION_STYLE[ruling.disposition]
             console.print(f"  [bold]{surface}[/bold]  {final.describe()}")
@@ -735,17 +741,16 @@ def stage_razorpay(scenario, *, notify: bool) -> None:
                 f"    ruling     [{style}]{ruling.disposition.value.upper()}[/{style}]"
                 f"  [dim]{len(engine.rules)} rules consulted[/dim]"
             )
-            try:
-                result = executor.execute(final, utc(final.scheduled_at))
-            except RazorpayError as err:
-                console.print(f"    [red]razorpay   {err}[/red]\n")
-                continue
-            colour = "green" if result.outcome.value == "dispatched" else "yellow"
-            console.print(f"    outcome    [{colour}]{result.outcome.value}[/{colour}]")
-            if result.external:
-                console.print(f"    created    {result.external.describe()}")
-            console.print(f"    [dim]{result.detail}[/dim]\n")
-            dispatched += int(result.outcome.value == "dispatched")
+            # Not dispatched here. A permitted action is a permitted action *at
+            # its own moment*, and the moment is often not this one -- three
+            # rules exist mainly to move it. Sending now would make the
+            # reschedule a log entry rather than a protection.
+            entry = scheduler.submit(final, surface=Surface(surface), at=now)
+            held_ctx[entry.id] = chosen_ctx
+            console.print(
+                f"    scheduled  [dim]{entry.due_at:%m-%d %H:%M} UTC, "
+                f"held until then[/dim]\n"
+            )
 
         pending = queue.pending(now)
         if pending:
@@ -790,17 +795,20 @@ def stage_razorpay(scenario, *, notify: bool) -> None:
                     else "released, rescheduled"
                 )
                 console.print(f"  [green]{word}[/green]  {release.action.describe()}")
-                try:
-                    result = executor.execute(
-                        release.action, utc(release.action.scheduled_at)
-                    )
-                except RazorpayError as err:
-                    console.print(f"    [red]razorpay   {err}[/red]")
-                    continue
-                console.print(f"    outcome    {result.outcome.value}")
-                if result.external:
-                    console.print(f"    created    {result.external.describe()}")
-                dispatched += int(result.outcome.value == "dispatched")
+                # An approved action still waits for its moment. A human yes
+                # is not a reason to ignore the hour the rules chose.
+                entry = scheduler.submit(
+                    release.action, surface=release.request.surface, at=later
+                )
+                # The context the request was judged in, never a fallback:
+                # firing against some other subject's context is exactly the
+                # bug this line used to have.
+                approved_ctx = held_ctx.get(release.request.id)
+                if approved_ctx is not None:
+                    held_ctx[entry.id] = approved_ctx
+                console.print(
+                    f"    scheduled  [dim]{entry.due_at:%m-%d %H:%M} UTC[/dim]"
+                )
 
             expired = queue.expire_due(now + timedelta(days=3))
             console.print(
@@ -814,6 +822,8 @@ def stage_razorpay(scenario, *, notify: bool) -> None:
                 f"{len(engine.rules)} of them at the\n"
                 "  later clock, and a DENY would still have won.[/dim]\n"
             )
+
+        dispatched += run_schedule(scheduler, executor, engine, held_ctx)
 
         settled = executor.reconcile()
         console.print(
@@ -839,6 +849,87 @@ def stage_razorpay(scenario, *, notify: bool) -> None:
     finally:
         transport.close()
     console.print()
+
+
+def run_schedule(scheduler, executor, engine, held_ctx) -> int:
+    """Advance a clock through the schedule and fire what comes due.
+
+    A deployment would sleep between these moments. The walkthrough does not
+    have that long, so it steps the clock to each scheduled moment in turn --
+    which is the same loop with the waiting taken out, and worth saying out
+    loud rather than implying that anything waited.
+
+    Starting from the earliest scheduled moment rather than from `now` is not a
+    convenience either. The batch is historical, so a plan drawn against it is
+    drawn for moments that have already passed; replaying from the first of
+    them is what the backtest does too, and reading the clock any other way
+    would report every action as arriving a week late.
+    """
+    from dataclasses import replace
+
+    from backstop.execute.razorpay import RazorpayError, reference_for
+    from backstop.schedule import Fate
+
+    waiting = scheduler.waiting()
+    if not waiting:
+        return 0
+
+    console.print(
+        f"[bold]the clock advances[/bold]  [dim]{len(waiting)} scheduled "
+        "moment(s), stepped rather than slept through[/dim]\n"
+    )
+
+    fired = 0
+    # Bounded: a fire-time reschedule adds a new moment, and a loop that
+    # followed those indefinitely would be the unbounded retry the scheduler
+    # exists to prevent.
+    for _ in range(12):
+        tick = scheduler.next_due
+        if tick is None:
+            break
+
+        def context_for(action, *, tick=tick):
+            ctx = held_ctx.get(reference_for(action))
+            return replace(ctx, now=tick) if ctx else None
+
+        try:
+            firings = scheduler.run_due(executor, engine, context_for, at=tick)
+        except RazorpayError as err:
+            console.print(f"  [red]razorpay   {err}[/red]")
+            break
+        if not firings:
+            break
+
+        for firing in firings:
+            when = f"{firing.scheduled.due_at:%m-%d %H:%M}"
+            if firing.fate is Fate.DISPATCHED:
+                result = firing.result
+                console.print(
+                    f"  [green]fired[/green]      {when}  "
+                    f"{firing.scheduled.action.type.value} "
+                    f"{firing.scheduled.action.subject_id}"
+                )
+                if result and result.external:
+                    console.print(f"               created {result.external.describe()}")
+                console.print(f"               [dim]{firing.detail}[/dim]")
+                fired += int(bool(result) and result.outcome.value == "dispatched")
+            elif firing.fate is Fate.DEFERRED:
+                console.print(f"  [yellow]deferred[/yellow]   {when}  {firing.detail}")
+            elif firing.fate is Fate.REFUSED:
+                console.print(f"  [red]refused[/red]    {when}  {firing.detail}")
+            elif firing.fate is Fate.STALE:
+                console.print(f"  [dim]stale[/dim]      {when}  {firing.detail}")
+            else:
+                console.print(f"  [dim]abandoned[/dim]  {when}  {firing.detail}")
+
+    console.print(
+        "\n  [dim]Nothing above went out before the moment the rules chose for it,\n"
+        "  and every action was ruled on again when it came due rather than\n"
+        "  riding a verdict reached hours earlier. An engine that moves an SMS\n"
+        "  out of the night, followed by an adapter that sends it at 22:30\n"
+        "  anyway, has not protected anybody -- it has logged that it did.[/dim]\n"
+    )
+    return fired
 
 
 def show_webhook(executor) -> None:
