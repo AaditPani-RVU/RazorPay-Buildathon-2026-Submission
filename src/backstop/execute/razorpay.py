@@ -111,6 +111,17 @@ from backstop.execute.executor import (
     ExternalRef,
     Outcome,
 )
+from backstop.store.codec import (
+    dump_action,
+    dump_money,
+    dump_ref,
+    dump_time,
+    load_action,
+    load_money,
+    load_ref,
+    load_time,
+)
+from backstop.store.journal import DISPATCH, Journal
 
 RAZORPAY_API = "https://api.razorpay.com/v1"
 
@@ -395,6 +406,35 @@ class Dispatch:
     def poll_path(self) -> str:
         return f"/{self.ref.entity}s/{self.ref.id}"
 
+    def to_record(self, *, reconciled: bool) -> dict[str, Any]:
+        """Everything needed to credit this dispatch in a later process.
+
+        The entity id and its kind are the load-bearing part: a webhook
+        arrives naming an id, and without a record tying that id back to the
+        action that created it the receiver correctly refuses to credit a
+        stranger. The amount travels too, because what a settlement is worth
+        is decided by the action -- a re-registered mandate is a year of
+        billing -- and a later process must not have to guess at it.
+        """
+        return {
+            "reference": self.reference,
+            "ref": dump_ref(self.ref),
+            "action": dump_action(self.action),
+            "amount": dump_money(self.amount),
+            "at": dump_time(self.at),
+            "reconciled": reconciled,
+        }
+
+    @classmethod
+    def from_record(cls, body: dict[str, Any]) -> Dispatch:
+        return cls(
+            reference=str(body["reference"]),
+            ref=load_ref(body["ref"]),
+            action=load_action(body["action"]),
+            amount=load_money(body["amount"]) or Money.zero(),
+            at=load_time(body["at"]),
+        )
+
 
 # --------------------------------------------------------------------------
 # The adapter
@@ -433,8 +473,37 @@ class RazorpayExecutor:
     notify: bool = False
     """Whether to actually send. Off by default; test mode really delivers."""
     name: str = "razorpay-test"
+    journal: Journal | None = None
+    """Where dispatches are written down, if anywhere.
+
+    `dispatched` is the only handle this system has on something that has
+    already left the building, and `reconciled` is what stops one settlement
+    being booked as recovery twice. Held in memory alone, a restart turns a
+    sent payment link into an orphan -- nothing to poll and nothing for a
+    webhook to match, so a payment that lands on it can never be credited --
+    and turns an already-credited dispatch back into an uncredited one, so
+    the next `payment_link.paid` books the same money again. Given a journal,
+    the constructor restores both, and every dispatch and every crediting is
+    written as it happens.
+    """
     dispatched: dict[str, Dispatch] = field(default_factory=dict, init=False)
     reconciled: set[str] = field(default_factory=set, init=False)
+
+    def __post_init__(self) -> None:
+        if self.journal is None:
+            return
+        for body in self.journal.replay().latest(DISPATCH).values():
+            dispatch = Dispatch.from_record(body)
+            self.dispatched[dispatch.reference] = dispatch
+            if body.get("reconciled"):
+                self.reconciled.add(dispatch.reference)
+
+    def _remember(self, dispatch: Dispatch) -> None:
+        if self.journal is not None:
+            self.journal.append(
+                DISPATCH, dispatch.reference,
+                dispatch.to_record(reconciled=dispatch.reference in self.reconciled),
+            )
 
     # -- the protocol ------------------------------------------------------
 
@@ -478,20 +547,21 @@ class RazorpayExecutor:
         if ref is None:
             # Already sent, by an earlier run or an earlier process. Recover
             # the entity it created rather than merely declining to send
-            # again: without this the dispatch is unreconcilable forever,
-            # because a restart loses the in-memory `dispatched` map and the
-            # only handle on the thing that went out is the reference. A
-            # payment that lands on a link this system sent, in a process that
-            # has since restarted, would otherwise never be credited.
+            # again: without this the dispatch is unreconcilable forever, and
+            # the only handle on the thing that went out is the reference. A
+            # journal restores this too, and better -- it recovers the auth
+            # links this lookup cannot -- but the two are not redundant: this
+            # path is what an adapter running without a store, or against a
+            # journal somebody deleted, still has.
             existing = self._find_dispatched(action, reference)
             if existing is None:
                 return ExecutionResult(
                     action, Outcome.NO_EFFECT, at,
                     detail="Razorpay already holds this reference; not sent twice",
                 )
-            self.dispatched[reference] = Dispatch(
-                reference, existing, action, amount, at
-            )
+            recovered = Dispatch(reference, existing, action, amount, at)
+            self.dispatched[reference] = recovered
+            self._remember(recovered)
             return ExecutionResult(
                 action, Outcome.NO_EFFECT, at, external=existing,
                 detail=(
@@ -501,7 +571,15 @@ class RazorpayExecutor:
             )
 
         cost = self.costs.for_action(action)
-        self.dispatched[reference] = Dispatch(reference, ref, action, amount, at)
+        dispatch = Dispatch(reference, ref, action, amount, at)
+        self.dispatched[reference] = dispatch
+        # Recorded before the notification goes out, so a crash between the two
+        # leaves a dispatch that is known and reconcilable rather than an
+        # orphan. The journal is not a transaction across the network and does
+        # not pretend to be: what makes a crash *before* this line safe is that
+        # `reference` is unique at Razorpay, so the retry is refused there and
+        # `_find_dispatched` re-registers what already exists.
+        self._remember(dispatch)
         sent = self._notify(action, ref)
         return ExecutionResult(
             action, Outcome.DISPATCHED, at, cost=cost, external=ref,
@@ -554,6 +632,7 @@ class RazorpayExecutor:
         if paid is None:
             return None
         self.reconciled.add(dispatch.reference)
+        self._remember(dispatch)
         return ExecutionResult(
             dispatch.action, Outcome.RECOVERED, utc(at),
             recovered=paid, external=dispatch.ref, detail=detail,

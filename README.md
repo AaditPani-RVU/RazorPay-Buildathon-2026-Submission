@@ -23,9 +23,9 @@ assertion.
 ```
 Detect -> Diagnose -> Decide -> Enforce -> Schedule -> Execute -> Measure
 (stats)   (LLM)       (LLM)     (rules)    (a clock)   (adapter)  (backtest)
-                                   |                      ^
-                                Approve                Reconcile
-                              (a person)               (webhooks)
+                                   |           |          ^
+                                Approve      Journal   Reconcile
+                              (a person)    (a file)   (webhooks)
 ```
 
 - **Detect** — three scans for three shapes of failure: segmented success-rate
@@ -51,6 +51,9 @@ Detect -> Diagnose -> Decide -> Enforce -> Schedule -> Execute -> Measure
   dispatched.
 - **Measure** — replay one labelled batch through four arms and report the delta,
   on each surface separately and never summed.
+- **Journal** — what the live path holds is written down as it happens, because
+  a held action, an unspent approval and an already-credited settlement all
+  mean nothing if a restart forgets them.
 
 ## What it measures
 
@@ -65,8 +68,8 @@ failures, 1,331 lapsed mandates, 377 overdue invoices, `openai/gpt-oss-20b`:
 |---|---|---|---|---|---|---|
 | do-nothing | ₹0 | – | ₹0 | 0 | 0 | 0 |
 | naive-retry | ₹49,16,423 | ₹49,821 | ₹48,20,689 | 51,015 | 17,005 | **25,312** |
-| planner-unpoliced | ₹58,12,106 | ₹13,540 | ₹57,69,575 | 16,668 | 14,883 | 203 |
-| **backstop** | **₹57,96,298** | **–** | **₹57,67,780** | 15,979 | 14,751 | **0** |
+| planner-unpoliced | ₹58,12,922 | ₹13,639 | ₹57,70,347 | 16,516 | 14,886 | 172 |
+| **backstop** | **₹57,99,283** | **–** | **₹57,70,561** | 16,476 | 14,754 | **0** |
 
 **Recurring** — mandates that stopped collecting. ₹1,70,30,028 per year was at
 risk across 1,331 lapsed authorisations.
@@ -101,7 +104,7 @@ produce a headline nobody could reconcile.*
 Five things worth reading off those tables.
 
 **Against the realistic alternative**, Backstop keeps ₹9.5L more than naive
-retry on payments while making 69% fewer charge attempts — and naive breaks
+retry on payments while making 68% fewer charge attempts — and naive breaks
 27,889 rules across the three surfaces doing it, including 600 retries of cards
 reported stolen, 2,667 attempts to chase customers who explicitly revoked their
 mandate, 93 chases of invoices the buyer is actively disputing and 84 sent to
@@ -116,21 +119,23 @@ it, where naive reaches 15 to 18. A customer with a failed order, a lapsed
 mandate and two overdue invoices is one person, and every per-subject cap can
 be scrupulously observed while they are written to a dozen times.
 
-**The leash is close to free, and where it is not, the price is stated.** The
+**The leash is free on all three surfaces, and it did not used to be.** The
 policed and unpoliced arms run identical proposed actions, so their gap is the
-cost of compliance alone. On receivables it is positive — the unpoliced arm
-takes ₹36,612 it cannot keep and spends more doing it. On recurring it is
-positive too, ₹10,792. On payments it is *negative*: policing costs ₹1,795 out
-of ₹57.7L, or 0.03%. Against naive rather than against itself, the largest
-single cost is the ninety-day bracket Backstop refuses to let automation work
-at all, described under Receivables below.
+cost of compliance alone: ₹10,792 in favour of policing on recurring, ₹214 on
+payments, ₹27 on receivables. The unpoliced arm takes money it cannot keep and
+spends more doing it. Payments used to be the exception — policing appeared to
+cost ₹1,795 there — and that number was an artefact of the reschedule bug
+described below, which dropped rescheduled actions instead of executing them
+later. Against naive rather than against itself, the largest single cost is the
+ninety-day bracket Backstop refuses to let automation work at all, described
+under Receivables below.
 
 **It holds when the model gets worse.** The table above *is* the weak model.
-`openai/gpt-oss-20b` proposes visibly worse actions — 73 re-presentations of
+`openai/gpt-oss-20b` proposes visibly worse actions — 40 re-presentations of
 mandates whose diagnosis had already established that re-presenting cannot
-work, 12 re-asks of customers who revoked their authorisation, and SMS dunning
-where email was the safe channel — and the engine refuses every one of them.
-241 rule breaks in the unpoliced arm, 0 in the policed one. That is the whole
+work, 12 re-asks of customers who revoked their authorisation, and 16 messages
+to people who opted out — and the engine refuses every one of them.
+210 rule breaks in the unpoliced arm, 0 in the policed one. That is the whole
 argument: safety that does not depend on model quality.
 
 **It holds when the model is gone.** On 2026-08-30 the account's Groq quota
@@ -138,7 +143,7 @@ argument: safety that does not depend on model quality.
 Recovery degraded to the deterministic playbook rather than stopping: the
 pipeline still proposed 35,158 actions, still recovered ₹58,30,774 on payments,
 and still broke zero rules. It is worth saying plainly that the fallback
-*out-recovered the weak model* on that batch by about ₹34,000 — the tail
+*out-recovered the weak model* on that batch by about ₹31,000 — the tail
 playbook is a real playbook, not a stub, and on failures with no incident to
 reason about a lookup table beats a small model. The model earns its place on
 diagnosis and cluster-level strategy, and nowhere else.
@@ -504,10 +509,10 @@ every action as arriving a week late.
 ### The restart hole, found by the demo
 
 Building the receiver surfaced a bug in the adapter that had been there since
-it was written. `dispatched` lives in memory, and a reference Razorpay already
-holds was reported as "not sent twice" and otherwise forgotten — so a process
-that sent a link and then died had lost its only handle on the thing that went
-out. A payment landing on that link could never be credited: not by a poll,
+it was written. `dispatched` lived only in memory, and a reference Razorpay
+already holds was reported as "not sent twice" and otherwise forgotten — so a
+process that sent a link and then died had lost its only handle on the thing
+that went out. A payment landing on that link could never be credited: not by a poll,
 which had nothing to poll, and not by a webhook, which would find no matching
 dispatch and correctly refuse to credit a stranger.
 
@@ -521,6 +526,95 @@ created with, so a re-registration dispatched by a process that has since died
 cannot be recovered. Guessing at one risks reconciling against somebody else's
 invoice, so the adapter declines and says so.
 
+The journal described below closes the same hole from the other side, and both
+are worth having. With one, a restart restores every dispatch including the
+auth links the lookup cannot recover. Without one — a process run with no
+store, or against a journal that has been deleted — the lookup is still what
+turns "Razorpay already holds this reference" into something reconcilable.
+
+### What survives a restart
+
+The scheduler holds actions for hours or days. That is the point of it, and it
+is also the assumption that a single process will still be there when the
+moment arrives, which is not an assumption a deployment gets to make. So the
+live path writes what it holds to a file, and `store/journal.py` is that file.
+
+The reason is not primarily lost work. Three sets in this system are what make
+"once" mean once:
+
+*   `released` in the approval queue is what stops one reviewer's yes from
+    dispatching twice.
+*   `dispatched` in the adapter is the only handle on a payment link that has
+    already gone out. Without it a payment landing on that link can never be
+    credited: nothing to poll, and nothing for a webhook to match.
+*   `reconciled` is what stops one settlement being booked as recovery twice,
+    and Razorpay redelivers webhooks by design.
+
+A restart that empties those does not merely lose work. It removes guarantees:
+somebody gets a second message off a single approval, and one payment is
+counted twice. That is why durability lives in the repo next to the rules
+rather than in a deployment note.
+
+The file is deliberately the smallest thing that does the job.
+
+**Whole snapshots, appended, last one wins.** Every state change writes the
+complete entity rather than a description of what changed, and replay reads
+forward keeping the last snapshot of each id. Restoring is one pass with no
+merge logic to get wrong.
+
+**Snapshots rather than deltas, because of how writes fail.** A delta log is
+smaller and reconstructs state only if every record survives. A torn write in
+one silently leaves an entity in the wrong state -- an approval whose release
+record was lost is an approval that can be spent again, which is the exact
+failure this file exists to prevent. With whole snapshots a damaged record
+costs one update and the entity falls back to its previous known state: stale,
+but never invented.
+
+**A torn tail is dropped and counted.** Replay skips what it cannot parse and
+reports how many, so a caller can say so out loud rather than quietly
+restoring less than it thinks.
+
+**Every append is flushed and fsynced before the caller is told it happened.**
+A durability layer that can lose the last write in exactly the crash it exists
+for is decoration.
+
+What it does not do is pretend to be a transaction across the network. A crash
+between creating a payment link at Razorpay and recording it locally is
+survivable for a different reason: the reference is unique at Razorpay, so the
+retry is refused there and the adapter re-registers the entity that already
+exists.
+
+Restoring changes nothing about what may happen. A restored action still does
+not fire early, a moment that passed while the process was down is still
+dropped as stale rather than fired two days late, a restored approval is still
+re-ruled before it dispatches, and the deferral counter comes back where it
+was -- otherwise a crash loop would be an unbounded retry loop, three pushes
+at a time.
+
+`--stage restart` demonstrates the whole of it offline: three actions and an
+approval are held, the process is dropped on the floor, and a new one reads
+only the file.
+
+### The reschedule that was a refusal
+
+Wiring the walkthrough's restart stage turned up a bug older than any of this.
+`Ruling.allowed` was defined as `ALLOW or REQUIRE_APPROVAL`, and the backtest
+skipped every action that was not `allowed`. `RESCHEDULE` is neither, so the
+measured arm silently dropped every action the three timing rules touched --
+which made `quiet_hours`, `retry_spacing` and `outage_hold` into denials
+wearing a different label. On seed 1 that is 588 of the 34,808 actions the
+policed arm proposed: an SMS the engine moved out of the night was not sent in
+the morning, it was not sent at all.
+
+`allowed` now means what it says: not denied. The tables above are the
+re-measured numbers, and the fix moves them.
+
+It is worth naming why this survived so long. Every other refusal in the
+system names the rule that produced it, and this one produced no record at all
+-- the action was simply absent from the ledger's executed list, which looks
+identical to a planner that never proposed it. The deferral path now names its
+rule too, for the same reason.
+
 ## Status
 
 **Built:** all three revenue surfaces, end to end and all three *measured* --
@@ -532,15 +626,21 @@ per surface, two execution backends behind one protocol -- the simulator that
 the measurement runs on, and a Razorpay test-mode adapter that really
 dispatches -- an approval queue that holds what the engine will not let
 automation decide alone, a scheduler that holds every action until its own
-moment and re-rules it there, and a signature-verifying webhook receiver that
-closes the loop without polling. 415 tests, and the repo is lint clean.
+moment and re-rules it there, a signature-verifying webhook receiver that
+closes the loop without polling, and a journal that carries all three across a
+restart without firing anything early or crediting anything twice. 451 tests,
+and the repo is lint clean.
 
 **Not built:** the webhook receiver is exercised against a locally signed
 delivery, because receiving one from Razorpay needs a public endpoint a
 walkthrough on a laptop does not have; the verification, matching and crediting
-are the real ones, and only the postman is simulated. And the scheduler steps a
-clock rather than sleeping -- a deployment would run the same loop on a timer,
-with the actions persisted rather than held in memory.
+are the real ones, and only the postman is simulated. Nothing ticks the
+scheduler on a timer -- the walkthrough steps a clock to each scheduled moment,
+and a deployment would run the same loop against the same journal on a real
+one. And the journal is a file, so it assumes one writer: two schedulers on it
+would interleave snapshots and the last would win. That wants a database, and
+the components take the store as a constructor argument so swapping one in is
+not a rewrite.
 
 ## Seeing it run
 
@@ -551,6 +651,7 @@ with the actions persisted rather than held in memory.
 .venv/bin/python -m backstop.demo --stage receivables  # just the aged ledger
 .venv/bin/python -m backstop.demo --stage razorpay   # live dispatch, test-mode keys
 .venv/bin/python -m backstop.demo --stage razorpay --notify   # and actually send
+.venv/bin/python -m backstop.demo --stage restart    # kill it mid-flight, bring it back
 .venv/bin/python -m backstop.execute.razorpay        # what the keys can reach
 .venv/bin/python -m backstop.evaluation.backtest     # the four-arm measurement
 .venv/bin/python -m backstop.evaluation.backtest --model openai/gpt-oss-20b

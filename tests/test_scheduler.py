@@ -382,3 +382,28 @@ def test_counts_and_surface_views_report_the_same_entries():
     s.submit(dunning(at=NOW, subject="inv_1"), surface=Surface.RECEIVABLE, at=NOW)
     assert s.counts()[SchedulerState.WAITING] == 2
     assert len(s.on(Surface.RECEIVABLE).entries) == 1
+
+
+# --------------------------------------------------------------------------
+# a deferral names its author
+# --------------------------------------------------------------------------
+
+
+def test_a_deferral_names_the_rule_that_moved_it():
+    """Every other disposition in this system names the rule behind it. A
+    deferral that could only say "a rule" would be the exception, and the
+    audit trail is the product."""
+    scheduler = Scheduler()
+    until = NOW + timedelta(hours=6)
+    action = Action(type=ActionType.RETRY_PAYMENT, subject_id="o",
+                    scheduled_at=NOW, rationale="r")
+    scheduler.submit(action, at=NOW)
+
+    [firing] = scheduler.run_due(
+        Recorder(), PolicyEngine(), always(ctx(outage_until=until)), at=NOW
+    )
+
+    assert firing.fate is Fate.DEFERRED
+    assert firing.ruling.moving_rule == "outage_hold"
+    assert "outage_hold" in firing.detail
+    assert "outage_hold" in firing.scheduled.note

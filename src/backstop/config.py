@@ -13,6 +13,11 @@ from pathlib import Path
 
 from backstop.llm.groq_provider import FAST_MODEL, REASONING_MODEL
 
+#: Where the live path's journal lives unless `BACKSTOP_JOURNAL` says
+#: otherwise. `runs/` is untracked, which is the point: the file names real
+#: payment links and the customers they went to.
+DEFAULT_JOURNAL = "runs/live.jsonl"
+
 
 def load_dotenv(path: str | Path = ".env", *, override: bool = False) -> dict[str, str]:
     """Load KEY=VALUE pairs into os.environ. Shell values win unless override."""
@@ -42,6 +47,13 @@ class Settings:
     razorpay_webhook_secret: str | None
     reasoning_model: str
     fast_model: str
+    journal_path: Path
+    """Where the live path writes what has to outlive the process.
+
+    Under `runs/` by default, which is already untracked: a journal holds real
+    dispatch references and the ids of people who were contacted, and that is
+    not something to commit by accident.
+    """
 
     @classmethod
     def load(cls, path: str | Path = ".env") -> Settings:
@@ -53,6 +65,7 @@ class Settings:
             razorpay_webhook_secret=os.environ.get("RAZORPAY_WEBHOOK_SECRET") or None,
             reasoning_model=os.environ.get("BACKSTOP_LLM_MODEL") or REASONING_MODEL,
             fast_model=os.environ.get("BACKSTOP_FAST_MODEL") or FAST_MODEL,
+            journal_path=Path(os.environ.get("BACKSTOP_JOURNAL") or DEFAULT_JOURNAL),
         )
 
     @property
@@ -87,5 +100,6 @@ class Settings:
                 f"  reasoning model: {self.reasoning_model}",
                 f"  fast model:      {self.fast_model}",
                 f"  razorpay mode:   {'TEST' if self.razorpay_is_test_mode else 'NOT TEST MODE'}",
+                f"  journal:         {self.journal_path}",
             ]
         )

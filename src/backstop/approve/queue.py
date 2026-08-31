@@ -70,6 +70,15 @@ from backstop.policy.engine import (
     PolicyEngine,
     Ruling,
 )
+from backstop.store.codec import (
+    dump_action,
+    dump_ruling,
+    dump_time,
+    load_action,
+    load_ruling,
+    load_time,
+)
+from backstop.store.journal import APPROVAL, Journal
 
 #: How long a request stays answerable. Two working days: long enough that a
 #: reviewer who is not at their desk on a Friday afternoon still gets there,
@@ -136,6 +145,45 @@ class ApprovalRequest:
         # walkthrough, which would read them as markup and silently drop the
         # half of the line that says why a person is being asked.
         return f"{self.action.describe()}  <- {self.asking_rule}: {self.reason}"
+
+    # -- durability --------------------------------------------------------
+
+    def to_record(self, *, released: bool) -> dict:
+        """A whole snapshot, carrying the release flag with it.
+
+        `released` belongs on the request rather than in a set of its own
+        because the two must not be able to disagree after a restart. A
+        request restored as approved-and-not-yet-released, when it had in fact
+        been dispatched, is a second contact for one person's single yes.
+        """
+        return {
+            "id": self.id,
+            "action": dump_action(self.action),
+            "ruling": dump_ruling(self.ruling),
+            "surface": self.surface.value,
+            "submitted_at": dump_time(self.submitted_at),
+            "expires_at": dump_time(self.expires_at),
+            "state": self.state.value,
+            "decided_at": dump_time(self.decided_at),
+            "decided_by": self.decided_by,
+            "note": self.note,
+            "released": released,
+        }
+
+    @classmethod
+    def from_record(cls, body: dict) -> ApprovalRequest:
+        return cls(
+            id=str(body["id"]),
+            action=load_action(body["action"]),
+            ruling=load_ruling(body["ruling"]),
+            surface=Surface(body["surface"]),
+            submitted_at=load_time(body["submitted_at"]),
+            expires_at=load_time(body["expires_at"]),
+            state=ApprovalState(body["state"]),
+            decided_at=load_time(body.get("decided_at")),
+            decided_by=str(body.get("decided_by") or ""),
+            note=str(body.get("note") or ""),
+        )
 
 
 @dataclass
@@ -211,9 +259,35 @@ class ApprovalQueue:
 
     requests: dict[str, ApprovalRequest] = field(default_factory=dict)
     ttl: timedelta = DEFAULT_TTL
+    journal: Journal | None = None
+    """Where the desk's decisions are written down, if anywhere.
+
+    The reason is `released` rather than the requests themselves. Losing a
+    pending request on a restart costs a recovery; losing the record that one
+    was already dispatched costs somebody a second contact off a single yes,
+    and turns "an approval is answered once" into "an approval is answered
+    once per process lifetime". Given a journal, the constructor restores both
+    from it.
+    """
     released: set[str] = field(default_factory=set, init=False)
     """Requests already dispatched. A queue that can release twice is a queue
     that can contact somebody twice for one approval."""
+
+    def __post_init__(self) -> None:
+        if self.journal is None or self.requests:
+            return
+        for body in self.journal.replay().latest(APPROVAL).values():
+            request = ApprovalRequest.from_record(body)
+            self.requests[request.id] = request
+            if body.get("released"):
+                self.released.add(request.id)
+
+    def _remember(self, request: ApprovalRequest) -> None:
+        if self.journal is not None:
+            self.journal.append(
+                APPROVAL, request.id,
+                request.to_record(released=request.id in self.released),
+            )
 
     # -- in ----------------------------------------------------------------
 
@@ -251,6 +325,7 @@ class ApprovalQueue:
             expires_at=at + (ttl or self.ttl),
         )
         self.requests[rid] = request
+        self._remember(request)
         return request
 
     # -- the desk ----------------------------------------------------------
@@ -290,11 +365,13 @@ class ApprovalQueue:
             # nobody got to it in time, not that somebody did.
             request.state = ApprovalState.EXPIRED
             request.decided_at = at
+            self._remember(request)
             return request
         request.state = state
         request.decided_at = at
         request.decided_by = by
         request.note = note
+        self._remember(request)
         return request
 
     def staff(self, reviewer: StandingApproval, *, at: datetime) -> list[ApprovalRequest]:
@@ -334,6 +411,7 @@ class ApprovalQueue:
             if request.state is ApprovalState.PENDING and at >= utc(request.expires_at):
                 request.state = ApprovalState.EXPIRED
                 request.decided_at = utc(request.expires_at)
+                self._remember(request)
                 out.append(request)
         return out
 
@@ -368,9 +446,14 @@ class ApprovalQueue:
                     Release(request, ReleaseOutcome.REFUSED, request.ruling, None)
                 )
                 self.released.add(request.id)
+                self._remember(request)
                 continue
             ruling = engine.evaluate(request.action, ctx)
             self.released.add(request.id)
+            # Written before the caller is told it may dispatch, not after.
+            # The other order leaves a window in which a crash loses the fact
+            # that this approval was spent, and a restart would spend it again.
+            self._remember(request)
             if ruling.disposition is Disposition.DENY:
                 out.append(Release(request, ReleaseOutcome.REFUSED, ruling, None))
                 continue
@@ -411,6 +494,8 @@ class ApprovalQueue:
         return out
 
     def on(self, surface: Surface) -> ApprovalQueue:
+        # No journal on a view, for the same reason the scheduler's view has
+        # none: this is a way of reading the queue, not a second owner of it.
         view = ApprovalQueue(
             requests={k: v for k, v in self.requests.items() if v.surface is surface},
             ttl=self.ttl,

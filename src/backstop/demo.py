@@ -10,6 +10,7 @@ check the pipeline rather than take its word.
     python -m backstop.demo --stage policy       # just the safety boundary
     python -m backstop.demo --stage receivables  # just the aged ledger
     python -m backstop.demo --stage razorpay     # live dispatch, test-mode keys
+    python -m backstop.demo --stage restart      # kill it mid-flight, bring it back
     python -m backstop.demo --seed 3
 
 The pipeline is Detect -> Diagnose -> Decide -> Enforce -> Execute -> Measure,
@@ -618,10 +619,10 @@ def stage_razorpay(scenario, *, notify: bool) -> None:
         HttpTransport,
         RazorpayExecutor,
         capabilities,
-        reference_for,
     )
     from backstop.ledger.ledger import Surface
-    from backstop.schedule import Scheduler
+    from backstop.schedule import Scheduler, SchedulerState
+    from backstop.store import Journal
 
     settings = Settings.load()
     if not settings.has_razorpay:
@@ -662,6 +663,13 @@ def stage_razorpay(scenario, *, notify: bool) -> None:
 
         engine = PolicyEngine()
         now = scenario.ends_at
+        # The one stage that can do something to a person gets the journal.
+        # It is the same file for all three components, and it is why a second
+        # run of this stage reports what it already sent rather than sending
+        # it again: the reference of an action is stable, and the record of
+        # having dispatched it outlives the process that did.
+        journal = Journal(settings.journal_path)
+        resumed = journal.replay()
         executor = RazorpayExecutor(
             transport=transport,
             orders={o.id: o for o in scenario.orders},
@@ -670,7 +678,16 @@ def stage_razorpay(scenario, *, notify: bool) -> None:
             customers=scenario.customers,
             subscription_by_order=scenario.subscription_by_order,
             notify=notify,
+            journal=journal,
         )
+        if resumed.records:
+            console.print(
+                f"  [dim]resuming from {settings.journal_path}: "
+                f"{len(executor.dispatched)} dispatch(es) known, "
+                f"{len(executor.reconciled)} already credited"
+                + (f", {resumed.damaged} record(s) unreadable" if resumed.damaged else "")
+                + ". Delete it for a clean run.[/dim]\n"
+            )
 
         # One candidate stream per surface. The subjects are chosen, the
         # rulings are not -- the first action the engine actually permits is
@@ -695,11 +712,19 @@ def stage_razorpay(scenario, *, notify: bool) -> None:
 
         console.print("[bold]three permitted actions, one per surface[/bold]\n")
         dispatched = 0
-        queue = ApprovalQueue()
-        scheduler = Scheduler()
+        queue = ApprovalQueue(journal=journal)
+        scheduler = Scheduler(journal=journal)
         # The context each held or scheduled action was judged in, so it can be
         # re-judged against the same subject at a later clock. Both the queue's
         # release and the scheduler's fire-time re-rule read this.
+        #
+        # Keyed by subject, not by the action's fingerprint. A context describes
+        # an order, an invoice and a person, none of which change when a rule
+        # moves the action -- and the fingerprint does, because the moment is
+        # part of it. Keyed the other way, a deferred action comes back at its
+        # new time with no context to be judged against and is refused as a
+        # subject that left the batch, which is the one thing a deferral must
+        # not turn into.
         held_ctx: dict[str, PolicyContext] = {}
         for surface, candidates in streams:
             chosen = None
@@ -721,7 +746,7 @@ def stage_razorpay(scenario, *, notify: bool) -> None:
                     request = queue.submit(
                         action, ruling, surface=Surface(surface), at=now
                     )
-                    held_ctx[request.id] = ctx
+                    held_ctx[request.action.subject_id] = ctx
                     continue
                 if ruling.allowed and chosen is None:
                     # The context travels with the choice. The scan runs to
@@ -746,11 +771,21 @@ def stage_razorpay(scenario, *, notify: bool) -> None:
             # rules exist mainly to move it. Sending now would make the
             # reschedule a log entry rather than a protection.
             entry = scheduler.submit(final, surface=Surface(surface), at=now)
-            held_ctx[entry.id] = chosen_ctx
-            console.print(
-                f"    scheduled  [dim]{entry.due_at:%m-%d %H:%M} UTC, "
-                f"held until then[/dim]\n"
-            )
+            held_ctx[entry.action.subject_id] = chosen_ctx
+            if entry.state is SchedulerState.WAITING:
+                console.print(
+                    f"    scheduled  [dim]{entry.due_at:%m-%d %H:%M} UTC, "
+                    f"held until then[/dim]\n"
+                )
+            else:
+                # Restored from the journal in a terminal state. Re-running the
+                # same batch does not re-send it, and saying "held until then"
+                # about something that already fired would be a lie the file
+                # itself contradicts.
+                console.print(
+                    f"    [dim]{entry.state.value} on an earlier run "
+                    f"({entry.due_at:%m-%d %H:%M} UTC); not queued again[/dim]\n"
+                )
 
         pending = queue.pending(now)
         if pending:
@@ -780,7 +815,7 @@ def stage_razorpay(scenario, *, notify: bool) -> None:
             )
 
             def context_for(action: Action) -> PolicyContext | None:
-                ctx = held_ctx.get(reference_for(action))
+                ctx = held_ctx.get(action.subject_id)
                 return replace(ctx, now=later) if ctx else None
 
             for release in queue.release(engine, context_for, at=later):
@@ -800,12 +835,10 @@ def stage_razorpay(scenario, *, notify: bool) -> None:
                 entry = scheduler.submit(
                     release.action, surface=release.request.surface, at=later
                 )
-                # The context the request was judged in, never a fallback:
-                # firing against some other subject's context is exactly the
-                # bug this line used to have.
-                approved_ctx = held_ctx.get(release.request.id)
-                if approved_ctx is not None:
-                    held_ctx[entry.id] = approved_ctx
+                # No context to copy across: the entry is keyed by subject and
+                # the context for that subject is already the one the request
+                # was judged in. Firing against some other subject's context is
+                # exactly the bug this line used to have.
                 console.print(
                     f"    scheduled  [dim]{entry.due_at:%m-%d %H:%M} UTC[/dim]"
                 )
@@ -867,7 +900,7 @@ def run_schedule(scheduler, executor, engine, held_ctx) -> int:
     """
     from dataclasses import replace
 
-    from backstop.execute.razorpay import RazorpayError, reference_for
+    from backstop.execute.razorpay import RazorpayError
     from backstop.schedule import Fate
 
     waiting = scheduler.waiting()
@@ -889,7 +922,7 @@ def run_schedule(scheduler, executor, engine, held_ctx) -> int:
             break
 
         def context_for(action, *, tick=tick):
-            ctx = held_ctx.get(reference_for(action))
+            ctx = held_ctx.get(action.subject_id)
             return replace(ctx, now=tick) if ctx else None
 
         try:
@@ -1014,17 +1047,341 @@ def show_webhook(executor) -> None:
     )
 
 
+def stage_restart(scenario) -> None:
+    """Kill the process mid-flight and bring it back, twice over.
+
+    Everything before this stage is a claim about what a single process does
+    while it is running. This is what happens to those claims when it stops --
+    which it will, because deployments restart, and because the actions this
+    system holds are scheduled hours or days out.
+
+    Two different losses, and only one of them is about lost work.
+
+    A held action that exists only in memory is a promise nobody can keep. The
+    scheduler's guarantee is that nothing fires early; a process that forgets
+    its queue satisfies that guarantee perfectly and uselessly by never firing
+    anything at all.
+
+    The second loss is worse, because it is silent. `released` is what makes a
+    reviewer's yes spendable once, and `reconciled` is what makes a settlement
+    creditable once. Emptied by a restart, one approval dispatches a second
+    message to the same person, and the next redelivered `payment_link.paid`
+    books money that was already booked. Those are not lost work, they are
+    lost guarantees, which is why the journal sits in the repo next to the
+    rules rather than in a deployment note.
+
+    Offline: a temporary journal, the simulator, and a recorded transport. No
+    keys and no network.
+    """
+    import shutil
+    import tempfile
+    from dataclasses import replace
+    from pathlib import Path
+
+    from backstop.approve import ApprovalQueue, ApprovalState, ReleaseOutcome
+    from backstop.execute.executor import SimulatedExecutor
+    from backstop.execute.razorpay import (
+        ApiResponse,
+        RazorpayExecutor,
+        RecordedTransport,
+    )
+    from backstop.ledger.ledger import Surface
+    from backstop.schedule import Fate, Scheduler, SchedulerState
+    from backstop.store import Journal
+
+    rule("7. SURVIVE  a restart, without firing early or paying twice")
+
+    workdir = tempfile.mkdtemp(prefix="backstop-restart-")
+    try:
+        path = Path(workdir) / "live.jsonl"
+        engine = PolicyEngine()
+        now = scenario.ends_at
+
+        soon = _pick(scenario.failed_orders, DeclineCode.INSUFFICIENT_FUNDS)
+        missed = _pick(scenario.failed_orders, DeclineCode.ISSUER_UNAVAILABLE)
+        retryable = _pick(scenario.failed_orders, DeclineCode.GATEWAY_TIMEOUT)
+        # The approval comes off the receivables book rather than a failed
+        # payment: an order in this batch is a few thousand rupees and the
+        # engine asks for a person at twenty-five, so the subject that really
+        # goes to a desk is an aged invoice.
+        big = next(
+            (i for i in scenario.overdue_invoices
+             if i.outstanding >= Money.rupees(25000)),
+            None,
+        )
+        if not (big and soon and missed and retryable):
+            console.print("  [yellow]this batch has no suitable subjects[/yellow]\n")
+            return
+
+        held_ctx: dict[str, PolicyContext] = {}
+        # Down for two days. Long enough that one action's moment passes
+        # unattended, which is the case a restart must not paper over.
+        back_up = now + timedelta(days=2)
+
+        # News that did not exist when the plan was drawn: the rail this order
+        # charges through is degraded for the first nine hours after the
+        # process comes back. Nothing in the stored action knows that, which
+        # is the whole reason the rules run again at fire time.
+        outage_until = back_up + timedelta(hours=9)
+
+        def context_for(action, *, at):
+            ctx = held_ctx.get(action.subject_id)
+            if ctx is None:
+                return None
+            ctx = replace(ctx, now=at)
+            if action.is_charging and at < outage_until:
+                ctx = replace(ctx, outage_until=outage_until)
+            return ctx
+
+        # -- before the crash ------------------------------------------------
+
+        scheduler = Scheduler(journal=Journal(path))
+        queue = ApprovalQueue(journal=Journal(path))
+
+        # One of each case the restart has to get right: a moment that passes
+        # while nobody is running, a moment that arrives afterwards, and one
+        # the rules will want to move again when it does.
+        plans = [
+            (ActionType.SEND_DUNNING, "moment passes while down", missed,
+             now + timedelta(hours=1), Channel.EMAIL),
+            (ActionType.SEND_DUNNING, "due after the restart", soon,
+             back_up + timedelta(hours=3), Channel.EMAIL),
+            (ActionType.RETRY_PAYMENT, "into a rail that is degraded by then",
+             retryable, back_up + timedelta(hours=6), None),
+        ]
+        console.print("[bold]a process holds three actions and an approval[/bold]\n")
+        for kind, label, order_, when, channel in plans:
+            action = Action(
+                type=kind, subject_id=order_.id, scheduled_at=when,
+                channel=channel, rationale="scheduled by the planner",
+            )
+            ctx = PolicyContext(
+                now=now, order=order_, customer=scenario.customers.get(order_.customer_id)
+            )
+            ruling = engine.evaluate(action, ctx)
+            if not ruling.allowed:
+                continue
+            entry = scheduler.submit(ruling.final or action, surface=Surface.PAYMENT, at=now)
+            held_ctx[entry.action.subject_id] = ctx
+            console.print(
+                f"  held       {entry.due_at:%m-%d %H:%M} UTC  {order_.id}  "
+                f"[dim]{label}[/dim]"
+            )
+
+        approval_action = Action(
+            type=ActionType.SEND_DUNNING, subject_id=big.id, scheduled_at=now,
+            channel=Channel.EMAIL, rationale="high value, wants a person",
+        )
+        approval_ctx = PolicyContext(
+            now=now, invoice=big, customer=scenario.customers.get(big.buyer_id)
+        )
+        approval_ruling = engine.evaluate(approval_action, approval_ctx)
+        request = None
+        if approval_ruling.disposition is Disposition.REQUIRE_APPROVAL:
+            request = queue.submit(
+                approval_action, approval_ruling, surface=Surface.PAYMENT, at=now
+            )
+            held_ctx[request.action.subject_id] = approval_ctx
+            queue.approve(request.id, by="ops@merchant.test", at=now + timedelta(hours=1))
+            console.print(
+                f"  approved   {big.id}  [dim]{approval_ruling.disposition.value} -> "
+                "ops@merchant.test said yes, not yet dispatched[/dim]"
+            )
+
+        # -- the crash -------------------------------------------------------
+
+        console.print(
+            "\n  [red]the process dies here[/red]  [dim]nothing below reads a single "
+            "object from above[/dim]\n"
+        )
+        del scheduler, queue
+
+        scheduler = Scheduler(journal=Journal(path))
+        queue = ApprovalQueue(journal=Journal(path))
+
+        console.print("[bold]a new process, reading only the file[/bold]\n")
+        for entry in scheduler.waiting():
+            console.print(
+                f"  restored   {entry.due_at:%m-%d %H:%M} UTC  "
+                f"{entry.action.subject_id}  [dim]{entry.state.value}[/dim]"
+            )
+        if request is not None:
+            [approved] = queue.in_state(ApprovalState.APPROVED)
+            console.print(
+                f"  restored   {approved.action.subject_id}  [dim]approved by "
+                f"{approved.decided_by}, still unspent[/dim]"
+            )
+
+        # -- the clock runs on ------------------------------------------------
+
+        executor = SimulatedExecutor(
+            orders={o.id: o for o in scenario.orders},
+            recoverability=scenario.recoverability,
+            subscriptions={s.id: s for s in scenario.subscriptions},
+            mandate_recovery=scenario.mandate_recovery,
+            invoices={i.id: i for i in scenario.invoices},
+            invoice_recovery=scenario.invoice_recovery,
+        )
+        console.print("\n[bold]two days later, the clock advances[/bold]\n")
+        clock = back_up
+        for _ in range(6):
+            tick = scheduler.next_due
+            if tick is None:
+                break
+            # Never earlier than the moment the process came back: a queue
+            # restored at noon does not get to act at yesterday's ten o'clock.
+            at = max(tick, clock)
+            firings = scheduler.run_due(
+                executor, engine, lambda a, at=at: context_for(a, at=at), at=at
+            )
+            clock = at
+            if not firings:
+                break
+            for firing in firings:
+                colour = {
+                    Fate.DISPATCHED: "green", Fate.DEFERRED: "yellow",
+                    Fate.STALE: "dim", Fate.REFUSED: "red", Fate.ABANDONED: "dim",
+                }[firing.fate]
+                console.print(
+                    f"  [{colour}]{firing.fate.value:<10}[/{colour}] "
+                    f"{firing.scheduled.due_at:%m-%d %H:%M}  "
+                    f"{firing.scheduled.action.subject_id}  [dim]{firing.detail}[/dim]"
+                )
+
+        counts = scheduler.counts()
+        console.print(
+            "\n  [dim]The stale one is the point. Its moment passed while nobody was\n"
+            "  running, and coming back up is not a licence to fire it two days late:\n"
+            "  a retry timed for the hour after a failure is a different act on\n"
+            "  Thursday, and a reminder can arrive after the invoice was paid. It is\n"
+            "  dropped, and the drop is the record. The deferred one is the other\n"
+            "  half: the rules ran again at its own moment, in the world that held\n"
+            f"  then.  {counts[SchedulerState.STALE]} stale, "
+            f"{counts[SchedulerState.FIRED]} fired, "
+            f"{len(scheduler.waiting())} still held.[/dim]\n"
+        )
+
+        if request is not None:
+            releases = queue.release(
+                engine, lambda a: context_for(a, at=back_up), at=back_up
+            )
+            for release in releases:
+                word = ("refused" if release.outcome is ReleaseOutcome.REFUSED
+                        else "released")
+                console.print(f"  [bold]{word}[/bold]  {release.request.action.subject_id}"
+                              f"  [dim]one yes, spent once[/dim]")
+            again = ApprovalQueue(journal=Journal(path)).release(
+                engine, lambda a: context_for(a, at=back_up), at=back_up
+            )
+            console.print(
+                f"  [dim]a third process releases {len(again)} of them: the approval was\n"
+                "  already spent, and a restart is not a second yes.[/dim]\n"
+            )
+
+        # -- the other half: what already went out ----------------------------
+
+        console.print("[bold]and what had already left the building[/bold]\n")
+        link = ApiResponse(status=200, body={
+            "id": "plink_restart", "short_url": "https://rzp.io/rzp/R"})
+        routes = {
+            "POST /payment_links": [link],
+            "GET /orders": [ApiResponse(status=200, body={"count": 0, "items": []})],
+        }
+        dispatch_action = Action(
+            type=ActionType.SEND_DUNNING, subject_id=soon.id, scheduled_at=now,
+            channel=Channel.EMAIL, rationale="dispatched before the crash",
+        )
+        adapter_args = {
+            "orders": {o.id: o for o in scenario.orders},
+            "invoices": {i.id: i for i in scenario.invoices},
+            "subscriptions": {s.id: s for s in scenario.subscriptions},
+            "customers": scenario.customers,
+            "subscription_by_order": scenario.subscription_by_order,
+        }
+        before = RazorpayExecutor(
+            transport=RecordedTransport(routes=dict(routes)),
+            journal=Journal(path), **adapter_args,
+        )
+        sent = before.execute(dispatch_action, now)
+        console.print(
+            f"  dispatched {sent.external.id if sent.external else '-'}  "
+            f"[dim]{sent.outcome.value}[/dim]"
+        )
+        del before
+
+        after = RazorpayExecutor(
+            transport=RecordedTransport(routes=dict(routes)),
+            journal=Journal(path), **adapter_args,
+        )
+        recovered = _paid_webhook(after, "plink_restart", dispatch_action, now)
+        console.print(
+            f"  [green]{recovered[0].verdict.value:<10}[/green] a payment lands on it in "
+            f"the new process  [dim]{recovered[0].result.recovered.format() if recovered[0].result else ''}[/dim]"
+        )
+        console.print(
+            f"  [dim]{recovered[1].verdict.value:<10} Razorpay redelivers it  "
+            "-> credited nothing, twice is once[/dim]"
+        )
+
+        journal = Journal(path)
+        console.print(
+            f"\n  [dim]{journal.describe()}. Every state change is a whole snapshot,\n"
+            "  appended and fsynced before the caller is told it happened, so a torn\n"
+            "  write costs one update rather than an entity. What a restart cannot\n"
+            "  do is fire something early, launder a missed window, spend one\n"
+            "  approval twice, or credit one payment twice.[/dim]\n"
+        )
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+def _paid_webhook(executor, entity_id: str, action, at):
+    """Two identical deliveries into a process that never saw the dispatch."""
+    import hashlib
+    import hmac
+    import json
+
+    from backstop.execute.webhook import WebhookReceiver
+
+    secret = "whsec_walkthrough_only"
+    receiver = WebhookReceiver(executor=executor, secret=secret)
+    dispatch = executor.dispatch_for(entity_id)
+    body = json.dumps({
+        "entity": "event",
+        "event": "payment_link.paid",
+        "contains": ["payment_link"],
+        "payload": {"payment_link": {"entity": {
+            "id": entity_id, "status": "paid",
+            "amount_paid": dispatch.amount.paise if dispatch else 0,
+        }}},
+        "created_at": int(utc(at).timestamp()),
+    }).encode()
+    signature = hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+    return [
+        receiver.receive(body, signature, event_id="evt_first", at=at),
+        # A different event id: the delivery-level dedupe cannot help here, and
+        # the dispatch-level one -- the layer that survived the restart -- is
+        # what refuses it.
+        receiver.receive(body, signature, event_id="evt_second", at=at),
+    ]
+
+
 def stage_gaps() -> None:
     rule("NOT BUILT YET")
     console.print(
-        "  [yellow]scheduling[/yellow]  nothing holds a plan across real time. Every\n"
-        "              action carries a scheduled_at the rules can move, and the\n"
-        "              walkthrough dispatches immediately regardless. A deployment\n"
-        "              would wait.\n"
-        "  [yellow]a real URL[/yellow]  the webhook receiver is exercised against a\n"
-        "              locally signed delivery, because receiving one from Razorpay\n"
-        "              needs a public endpoint this walkthrough does not have. The\n"
-        "              verification, matching and crediting are the real ones.\n"
+        "  [yellow]a real URL[/yellow]  receiving a webhook from Razorpay needs a public\n"
+        "              endpoint a laptop does not have, so the delivery in the sample\n"
+        "              above is signed locally. The verification, the matching and the\n"
+        "              crediting are the real ones; only the postman is simulated.\n"
+        "  [yellow]a timer[/yellow]     the scheduler holds actions and survives a restart,\n"
+        "              but nothing here ticks it. The walkthrough steps a clock to each\n"
+        "              scheduled moment; a deployment would run the same loop on a real\n"
+        "              one, against the same journal.\n"
+        "  [yellow]one writer[/yellow]  the journal is a file, so it assumes one process is\n"
+        "              writing it. Two schedulers on one file would interleave snapshots\n"
+        "              and the last would win. That wants a database, and every component\n"
+        "              takes the store as a constructor argument so swapping one in is\n"
+        "              not a rewrite.\n"
     )
 
 
@@ -1042,7 +1399,7 @@ def main() -> None:
     ap.add_argument(
         "--stage", default="all",
         choices=["all", "detect", "diagnose", "policy", "mandates", "receivables",
-                 "enforce", "backtest", "razorpay"],
+                 "enforce", "backtest", "razorpay", "restart"],
         help="stop after this stage",
     )
     args = ap.parse_args()
@@ -1069,6 +1426,9 @@ def main() -> None:
     if args.stage == "razorpay":
         stage_razorpay(scenario, notify=args.notify)
         return
+    if args.stage == "restart":
+        stage_restart(scenario)
+        return
 
     clusters = stage_detect(scenario)
     if args.stage == "detect":
@@ -1087,6 +1447,10 @@ def main() -> None:
     stage_backtest(scenario, offline=args.offline, model=args.model)
     if not args.offline:
         stage_razorpay(scenario, notify=args.notify)
+    # Runs offline too, deliberately: what survives a restart is a property of
+    # the components rather than of having keys, and it is the one stage a
+    # reader can check without an account.
+    stage_restart(scenario)
     stage_gaps()
 
 

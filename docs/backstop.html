@@ -282,7 +282,7 @@ footer {
       surface it works, and breaks zero rules doing it — because every action it takes is
       ruled on by code, not by a prompt.</p>
     <p class="byline eyebrow">
-      <span>Backstop</span><span>3 revenue surfaces</span><span>16 policy rules</span><span>415 tests</span>
+      <span>Backstop</span><span>3 revenue surfaces</span><span>16 policy rules</span><span>451 tests</span>
     </p>
   </header>
 
@@ -334,8 +334,8 @@ footer {
           <tbody>
             <tr><td class="arm">do-nothing</td><td class="nil">₹0</td><td class="nil">–</td><td class="nil">₹0</td><td class="nil">0</td><td class="nil">0</td><td class="viol-ok">0</td></tr>
             <tr><td class="arm">naive-retry</td><td>₹49,16,423</td><td class="illegal">₹49,821</td><td>₹48,20,689</td><td>51,015</td><td>17,005</td><td class="viol-bad">25,312</td></tr>
-            <tr><td class="arm">planner-unpoliced</td><td>₹58,12,106</td><td class="illegal">₹13,540</td><td>₹57,69,575</td><td>16,668</td><td>14,883</td><td class="viol-bad">203</td></tr>
-            <tr class="hero"><td class="arm">backstop</td><td>₹57,96,298</td><td class="nil">–</td><td>₹57,67,780</td><td>15,979</td><td>14,751</td><td class="viol-ok">0</td></tr>
+            <tr><td class="arm">planner-unpoliced</td><td>₹58,12,922</td><td class="illegal">₹13,639</td><td>₹57,70,347</td><td>16,516</td><td>14,886</td><td class="viol-bad">172</td></tr>
+            <tr class="hero"><td class="arm">backstop</td><td>₹57,99,283</td><td class="nil">–</td><td>₹57,70,561</td><td>16,476</td><td>14,754</td><td class="viol-ok">0</td></tr>
           </tbody>
         </table>
       </div>
@@ -407,14 +407,14 @@ footer {
     <div class="readings">
       <article class="reading">
         <h3>It beats the realistic alternative, not a strawman</h3>
-        <p>Backstop keeps ₹9.5L more than naive retry on payments while making 69% fewer
+        <p>Backstop keeps ₹9.5L more than naive retry on payments while making 68% fewer
           charge attempts. Naive breaks 27,889 rules across the three surfaces getting
           its number — including 600 retries of cards reported stolen, 2,667 attempts to
           chase customers who explicitly revoked their mandate, 93 chases of invoices the
           buyer is actively disputing, and 84 sent to buyers who had already committed to
           a payment date.</p>
         <div class="figure-row">
-          <div class="figure good"><span class="v">−69%</span><span class="k">charge attempts</span></div>
+          <div class="figure good"><span class="v">−68%</span><span class="k">charge attempts</span></div>
           <div class="figure bad"><span class="v">27,889</span><span class="k">rules naive breaks</span></div>
           <div class="figure good"><span class="v">0</span><span class="k">rules Backstop breaks</span></div>
         </div>
@@ -435,21 +435,23 @@ footer {
       </article>
 
       <article class="reading">
-        <h3>The leash is close to free, and where it is not, the price is stated</h3>
+        <h3>The leash is free on all three surfaces, and it did not used to be</h3>
         <p>The policed and unpoliced arms run identical proposed actions, so the gap
-          between them is the cost of compliance alone. On receivables it is positive —
-          the unpoliced arm takes ₹36,612 it cannot keep and spends more doing it. On
-          recurring it is positive too, ₹10,792. On payments it is negative: policing
-          costs ₹1,795 out of ₹57.7L, or 0.03%.</p>
+          between them is the cost of compliance alone — and it now runs in policing’s
+          favour on every surface: ₹10,792 on recurring, ₹214 on payments, ₹27 on
+          receivables. The unpoliced arm takes money it cannot keep and spends more
+          doing it. Payments used to be the exception, at an apparent cost of ₹1,795,
+          and that was an artefact of the reschedule bug below rather than a price of
+          compliance.</p>
       </article>
 
       <article class="reading">
         <h3>It holds when the model gets worse</h3>
         <p>The tables above <em>are</em> the weak model. <code>gpt-oss-20b</code> proposes
-          visibly worse actions — 73 re-presentations of mandates whose diagnosis had
+          visibly worse actions — 40 re-presentations of mandates whose diagnosis had
           already established that re-presenting cannot work, 12 re-asks of customers who
-          revoked their authorisation, SMS dunning where email was the safe channel — and
-          the engine refuses every one. 241 rule breaks in the unpoliced arm, 0 in the
+          revoked their authorisation, 16 messages to people who opted out — and the
+          engine refuses every one. 210 rule breaks in the unpoliced arm, 0 in the
           policed one. That is the whole argument: safety that does not depend on model
           quality.</p>
       </article>
@@ -459,7 +461,7 @@ footer {
         <p>The Groq quota was exhausted mid-run and every cluster returned a 429. Recovery
           degraded to the deterministic playbook rather than stopping: still 35,158 actions
           proposed, still ₹58,30,774 recovered on payments, still zero rules broken. Worth
-          saying plainly — the fallback out-recovered the weak model by about ₹34,000. On
+          saying plainly — the fallback out-recovered the weak model by about ₹31,000. On
           failures with no incident to reason about, a lookup table beats a small model.
           The model earns its place on diagnosis and cluster strategy, and nowhere else.</p>
       </article>
@@ -619,6 +621,8 @@ footer {
 
   <hr class="rule-line">
 
+  <hr class="rule-line">
+
   <section class="col">
     <h2>What a receiver has to refuse</h2>
     <p class="lede">Polling is the wrong shape for this. A dispatch settles when a human
@@ -667,6 +671,75 @@ footer {
   <hr class="rule-line">
 
   <section class="col">
+    <h2>A process that forgets is a process that repeats</h2>
+    <p class="lede">The scheduler holds actions for hours or days. That is the point of
+      it, and it is also an assumption that one process will still be running when the
+      moment arrives — which is not an assumption a deployment gets to make.</p>
+    <p>The obvious cost of a restart is lost work: a held action nobody ever fires. The
+      expensive cost is quieter. Three sets in this system are what make “once” mean
+      once — the record that an approval was already spent, the record of what was
+      already dispatched, and the record of what was already credited. Emptied by a
+      restart, the first sends a second message to somebody off one reviewer’s single
+      yes; the second orphans a live payment link, so money landing on it can never be
+      credited by a poll or a webhook; the third books one payment as recovery twice,
+      and Razorpay redelivers webhooks by design. Those are not lost work. They are lost
+      guarantees, which is why the journal lives next to the rules rather than in a
+      deployment note.</p>
+    <p><strong>Whole snapshots, appended, last one wins.</strong> Every state change
+      writes the complete entity rather than a description of what changed, and replay
+      keeps the last snapshot of each id. That is the opposite of the usual advice, and
+      the reason is how writes fail: a torn record in a delta log leaves an entity in the
+      wrong state forever — an approval whose release record was lost is an approval that
+      can be spent again — while a torn snapshot costs one update and the entity falls
+      back to its previous known state. Stale, but never invented. Anything unparseable
+      is skipped and counted rather than guessed at, and every append is fsynced before
+      the caller is told it happened, because a durability layer that loses the last
+      write in exactly the crash it exists for is decoration.</p>
+    <p><strong>Restoring changes nothing about what may happen.</strong> A restored
+      action still does not fire early. A moment that passed while the process was down
+      is still dropped as stale rather than fired two days late. A restored approval is
+      still re-ruled before it dispatches. And the deferral counter comes back where it
+      was — otherwise a crash loop would be an unbounded retry loop, three pushes at a
+      time.</p>
+    <div class="run">
+<pre><span class="c">the process dies here — nothing below reads a single object from above</span>
+
+  restored   08-31 01:00 UTC  order_0001000006352  waiting
+  restored   09-02 03:00 UTC  order_0001000006271  waiting
+  restored   09-02 06:00 UTC  order_000100000f9cb  waiting
+  restored   inv_00010000104eb  approved by ops@merchant.test, still unspent
+
+<span class="c">two days later, the clock advances</span>
+
+  <span style="color:var(--muted)">stale</span>      08-31 01:00  past the 1 day horizon, so not fired late
+  <span style="color:var(--allow)">dispatched</span> 09-02 03:00  order_0001000006271
+  <span style="color:var(--resched)">deferred</span>   09-02 09:00  outage_hold moved it to 09-02 09:00
+  <span style="color:var(--allow)">dispatched</span> 09-02 09:00  blocker had cleared
+
+  <span style="color:var(--allow)">recovered</span>  a payment lands on the dispatched link, in the new process
+  <span style="color:var(--muted)">duplicate</span>  Razorpay redelivers it — credited nothing, twice is once</pre>
+    </div>
+    <p class="surface-note" style="margin-top:1rem">Two limits, stated rather than
+      buried. Nothing ticks the scheduler on a timer — the walkthrough steps a clock to
+      each moment, and a deployment would run the same loop against the same file on a
+      real one. And the journal is a file, so it assumes a single writer; two schedulers
+      on one file would interleave snapshots and the last would win. That wants a
+      database, and every component takes the store as a constructor argument so
+      swapping one in is not a rewrite.</p>
+    <p style="margin-top:1.5rem">Wiring this up found a bug older than any of it.
+      <code>RESCHEDULE</code> was not counted as an allowed disposition, and the measured
+      arm skipped everything that was not allowed — so the three rules that exist to
+      <em>move</em> an action were quietly working as three more ways to kill it. On
+      seed 1 that is 588 of the 34,808 actions the policed arm proposed: an SMS pushed
+      out of the night was not sent in the morning, it was not sent at all. It survived because it produced no record — an
+      action absent from the executed list looks exactly like an action nobody proposed.
+      Every refusal in this system names the rule behind it, and now every deferral does
+      too.</p>
+  </section>
+
+  <hr class="rule-line">
+
+  <section class="col">
     <h2>What these numbers are not</h2>
     <p>Recovery rates in <code>simulate/recoverability.py</code> are stated configuration,
       not measured from Razorpay traffic. No real transaction data exists for this, so the
@@ -688,14 +761,17 @@ python -m backstop.demo --stage policy
 python -m backstop.evaluation.backtest
 
 <span class="c"># the queue, the webhook receiver, and a real dispatch — needs test-mode keys</span>
-python -m backstop.demo --stage razorpay</pre>
+python -m backstop.demo --stage razorpay
+
+<span class="c"># kill it mid-flight and bring it back — no keys, no network</span>
+python -m backstop.demo --stage restart</pre>
     </div>
   </section>
 
   <footer>
     <span>Backstop</span>
     <span>Razorpay AI Buildathon 2026</span>
-    <span>415 tests · lint clean</span>
+    <span>451 tests · lint clean</span>
   </footer>
 
 </div>

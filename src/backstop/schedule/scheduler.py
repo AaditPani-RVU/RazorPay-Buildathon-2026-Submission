@@ -64,6 +64,8 @@ from backstop.policy.engine import (
     PolicyEngine,
     Ruling,
 )
+from backstop.store.codec import dump_action, dump_time, load_action, load_time
+from backstop.store.journal import SCHEDULED, Journal
 
 #: How late an action may fire and still be the action that was planned. A
 #: recovery step timed for the hour after a failure is a different act a day
@@ -128,6 +130,44 @@ class ScheduledAction:
         moved = f"  moved {self.deferrals}x" if self.deferrals else ""
         return f"{self.due_at:%m-%d %H:%M}  {self.action.describe()}{moved}"
 
+    # -- durability --------------------------------------------------------
+
+    def to_record(self) -> dict:
+        """A whole snapshot of this entry, not a description of what changed.
+
+        `deferrals` and `history` travel with it because they are bounds, not
+        statistics: an entry restored with its counter at zero would be an
+        entry that can be pushed three more times, and the limit that stops a
+        never-clearing blocker would reset on every restart.
+        """
+        return {
+            "id": self.id,
+            "action": dump_action(self.action),
+            "surface": self.surface.value,
+            "due_at": dump_time(self.due_at),
+            "submitted_at": dump_time(self.submitted_at),
+            "state": self.state.value,
+            "deferrals": self.deferrals,
+            "history": [dump_time(h) for h in self.history],
+            "settled_at": dump_time(self.settled_at),
+            "note": self.note,
+        }
+
+    @classmethod
+    def from_record(cls, body: dict) -> ScheduledAction:
+        return cls(
+            id=str(body["id"]),
+            action=load_action(body["action"]),
+            surface=Surface(body["surface"]),
+            due_at=load_time(body["due_at"]),
+            submitted_at=load_time(body["submitted_at"]),
+            state=SchedulerState(body["state"]),
+            deferrals=int(body.get("deferrals", 0)),
+            history=[load_time(h) for h in body.get("history", []) if h],
+            settled_at=load_time(body.get("settled_at")),
+            note=str(body.get("note") or ""),
+        )
+
 
 @dataclass
 class Firing:
@@ -163,6 +203,27 @@ class Scheduler:
     entries: dict[str, ScheduledAction] = field(default_factory=dict)
     max_lateness: timedelta = DEFAULT_MAX_LATENESS
     max_deferrals: int = DEFAULT_MAX_DEFERRALS
+    journal: Journal | None = None
+    """Where held actions are written down, if anywhere.
+
+    Optional because the backtest has no use for one: it runs a batch to
+    completion in a single process and its answer is a number, not a promise
+    to somebody. A live deployment is the opposite -- what it holds is a
+    promise to act at a stated time, and a promise that only exists in one
+    process's memory is not one. Given a journal, the constructor restores
+    from it, and every state change is written before it is returned.
+    """
+
+    def __post_init__(self) -> None:
+        if self.journal is not None and not self.entries:
+            self.entries = {
+                body["id"]: ScheduledAction.from_record(body)
+                for body in self.journal.replay().latest(SCHEDULED).values()
+            }
+
+    def _remember(self, entry: ScheduledAction) -> None:
+        if self.journal is not None:
+            self.journal.append(SCHEDULED, entry.id, entry.to_record())
 
     # -- in ----------------------------------------------------------------
 
@@ -193,6 +254,7 @@ class Scheduler:
             history=[utc(action.scheduled_at)],
         )
         self.entries[rid] = entry
+        self._remember(entry)
         return entry
 
     # -- out ---------------------------------------------------------------
@@ -226,11 +288,17 @@ class Scheduler:
                     f"due {utc(at) - utc(entry.due_at)} ago; past the "
                     f"{self.max_lateness} horizon, so not fired late"
                 )
+                self._remember(entry)
                 out.append(Firing(entry, Fate.STALE, detail=entry.note))
                 continue
             if not entry.is_due(at):
                 continue
-            out.append(self._fire(entry, executor, engine, context_for, at=at))
+            firing = self._fire(entry, executor, engine, context_for, at=at)
+            # Written after every outcome, deferral included: a re-held action
+            # that came back on its old time would fire inside the quiet hours
+            # the deferral moved it out of.
+            self._remember(entry)
+            out.append(firing)
         return out
 
     def _fire(
@@ -276,11 +344,11 @@ class Scheduler:
             entry.due_at = moved_to
             entry.deferrals += 1
             entry.history.append(moved_to)
-            return Firing(
-                entry, Fate.DEFERRED, ruling=ruling,
-                detail=f"{ruling.blocking_rule or 'a rule'} moved it to "
-                       f"{moved_to:%m-%d %H:%M}",
+            entry.note = (
+                f"{ruling.moving_rule or 'a rule'} moved it to "
+                f"{moved_to:%m-%d %H:%M}"
             )
+            return Firing(entry, Fate.DEFERRED, ruling=ruling, detail=entry.note)
 
         result = executor.execute(final, at)
         entry.state = SchedulerState.FIRED
@@ -322,6 +390,9 @@ class Scheduler:
         return out
 
     def on(self, surface: Surface) -> Scheduler:
+        # No journal on a view. A surface view is a way of reading the queue,
+        # and a reader that wrote to the store would put the same entry in it
+        # under three different owners.
         return Scheduler(
             entries={k: v for k, v in self.entries.items() if v.surface is surface},
             max_lateness=self.max_lateness,
