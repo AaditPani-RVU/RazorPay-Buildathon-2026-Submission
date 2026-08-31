@@ -138,6 +138,25 @@ p { margin: 0; }
 }
 .stage.keystone { background: var(--deny-bg); }
 .stage.keystone .name, .stage.keystone .how { color: var(--deny); }
+/* A branch, not a step every action takes: marked, but not as the keystone. */
+.stage.branch .name, .stage.branch .how { color: var(--approval); }
+.stage.branch { box-shadow: inset 0 2px 0 var(--approval); }
+
+/* ---------- webhook verdicts: a small ledger, so read it as one ---------- */
+
+.verdicts { border: 1px solid var(--line); background: var(--surface); margin-top: 1.6rem; overflow-x: auto; }
+.verdicts table { min-width: 520px; }
+.verdicts td { white-space: nowrap; }
+.verdicts td.v {
+  font-family: "IBM Plex Mono", monospace; font-size: .8rem;
+  letter-spacing: .04em; text-transform: uppercase; font-weight: 500;
+}
+.verdicts td.said { white-space: normal; color: var(--ink-2); font-size: .9rem; text-align: left; }
+.verdicts td.code { font-family: "IBM Plex Mono", monospace; color: var(--muted); font-size: .82rem; }
+.v-reject { color: var(--deny); }
+.v-skip   { color: var(--resched); }
+.v-take   { color: var(--allow); }
+.v-dupe   { color: var(--muted); }
 
 /* ---------- prose ---------- */
 
@@ -263,7 +282,7 @@ footer {
       surface it works, and breaks zero rules doing it — because every action it takes is
       ruled on by code, not by a prompt.</p>
     <p class="byline eyebrow">
-      <span>Backstop</span><span>3 revenue surfaces</span><span>16 policy rules</span><span>343 tests</span>
+      <span>Backstop</span><span>3 revenue surfaces</span><span>16 policy rules</span><span>393 tests</span>
     </p>
   </header>
 
@@ -272,8 +291,10 @@ footer {
     <div class="stage"><span class="n">02</span><span class="name">Diagnose</span><span class="how">LLM</span></div>
     <div class="stage"><span class="n">03</span><span class="name">Decide</span><span class="how">LLM</span></div>
     <div class="stage keystone"><span class="n">04</span><span class="name">Enforce</span><span class="how">rules</span></div>
-    <div class="stage"><span class="n">05</span><span class="name">Execute</span><span class="how">adapter</span></div>
-    <div class="stage"><span class="n">06</span><span class="name">Measure</span><span class="how">backtest</span></div>
+    <div class="stage branch"><span class="n">05</span><span class="name">Approve</span><span class="how">a person</span></div>
+    <div class="stage"><span class="n">06</span><span class="name">Execute</span><span class="how">adapter</span></div>
+    <div class="stage"><span class="n">07</span><span class="name">Reconcile</span><span class="how">webhooks</span></div>
+    <div class="stage"><span class="n">08</span><span class="name">Measure</span><span class="how">backtest</span></div>
   </div>
 
   <section class="col">
@@ -491,21 +512,102 @@ footer {
     <div class="run">
 <pre><span class="c">$ python -m backstop.demo --stage razorpay</span>
 
-  payment     retry_payment order_000700000ba31
+  payment     retry_payment order_000100004cfc2
     ruling    <span style="color:var(--allow)">ALLOW</span>   16 rules consulted
     outcome   dispatched
-    created   order order_TW4QagoCn3ZEQp
+    created   order order_TWCsS24apsObn5
 
-  receivable  send_dunning inv_000700000df50 via email
+  receivable  send_dunning inv_000100004e5ea via email
     ruling    <span style="color:var(--allow)">ALLOW</span>   16 rules consulted
     outcome   dispatched
-    created   payment_link plink_TW4OMNt3c4D5K3
+    created   payment_link plink_TWCsU2fE3tQfnr
 
-  <span class="p">9 candidates held for approval and not dispatched</span>
-  reconcile   2 dispatched, 0 settled so far</pre>
+  <span class="p">430 candidates held for approval, and queued rather than dropped</span>
+  reconcile   3 dispatched, 0 settled so far</pre>
     </div>
     <p class="surface-note" style="margin-top:1rem">Zero settled is the correct answer rather
-      than a disappointing one. An approval gate that sends while it waits is not a gate.</p>
+      than a disappointing one.</p>
+  </section>
+
+  <hr class="rule-line">
+
+  <section class="col">
+    <h2>The gate has a queue behind it</h2>
+    <p class="lede">Those 430 held actions used to go nowhere. The engine produced the
+      ruling, the ledger counted it, and the live run correctly refused to send — then
+      dropped it. A gate with nothing behind it is a deletion.</p>
+    <p><strong>An approval is permission from a person, not an exemption from the rules.</strong>
+      A release re-runs all sixteen rules in the world that holds <em>then</em>, not the one
+      that held when the request was raised. Time passes while a request sits: a contact
+      budget fills, an hour becomes a quiet hour, a mandate gets revoked, an invoice goes
+      into dispute. A queue that dispatched whatever a reviewer approved on Tuesday would
+      be a hole in the policy engine exactly the width of the queue. So a denial still
+      denies after a yes, and the reviewer is told which rule overtook their decision.
+      What the yes discharges is the approval requirement itself — and nothing else, or
+      every approved action would be immortal in the queue.</p>
+    <p><strong>Silence is not consent.</strong> Unanswered requests expire, and expiry is
+      recorded rather than dropped. That is what makes the backtest’s assumption — that a
+      merchant staffs the desk — falsifiable instead of merely convenient. A merchant who
+      does not staff it gets a pile of expired requests, not the revenue.</p>
+    <div class="figure-row" style="margin-top:1.6rem">
+      <div class="figure"><span class="v">430</span><span class="k">held for a person</span></div>
+      <div class="figure good"><span class="v">1</span><span class="k">answered, then re-ruled and dispatched</span></div>
+      <div class="figure bad"><span class="v">429</span><span class="k">expired — credited to nobody</span></div>
+    </div>
+    <p style="margin-top:1.6rem">Every decision names a human being; there is no auto-approve.
+      The backtest’s staffed desk is written down as a reviewer with a stated latency and a
+      staffing rate, deterministic per request, so an assumption is something a reader can
+      see and argue with. And a request’s identity is the same fingerprint the adapter uses
+      for idempotency — verb, subject, moment, channel, amount, and deliberately not the
+      model’s wording. Re-running a plan finds the request a reviewer has already seen, and
+      a model rewording its own justification cannot buy a second ask.</p>
+  </section>
+
+  <hr class="rule-line">
+
+  <section class="col">
+    <h2>What a receiver has to refuse</h2>
+    <p class="lede">Polling is the wrong shape for this. A dispatch settles when a human
+      opens a link, so a poll either runs constantly and learns nothing or runs rarely and
+      reports recovery long after it happened. Razorpay pushes the news instead.</p>
+    <p>A webhook receiver is the one place in this system where an <em>outsider</em> proposes
+      a change to the revenue number — everything else is proposed by our own planner and
+      disposed of by our own rules. So it is written as a list of refusals. Four deliveries,
+      four different answers:</p>
+    <div class="verdicts">
+      <table>
+        <thead><tr><th>delivery</th><th>verdict</th><th>answer</th></tr></thead>
+        <tbody>
+          <tr><td class="said">Signed with the wrong secret</td><td class="v v-reject">rejected</td><td class="code">400</td></tr>
+          <tr><td class="said">A payment link the merchant created themselves, paid</td><td class="v v-skip">unmatched</td><td class="code">200</td></tr>
+          <tr><td class="said">An order recovery dispatched, paid</td><td class="v v-take">recovered</td><td class="code">200</td></tr>
+          <tr><td class="said">The same delivery, sent again</td><td class="v v-dupe">duplicate</td><td class="code">200</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p style="margin-top:1.5rem">The second row is the counterfactual argument arriving over
+      HTTP. A merchant’s own payment links are paid all day; that is real revenue and
+      recovery caused none of it. A receiver that credited every <code>payment_link.paid</code>
+      on the account would make exactly the error the receivables surface exists to warn
+      about — measuring the world’s ordinary behaviour and booking it as the agent’s work.
+      It answers 200 because it was handled correctly, and only a bad signature is a 400.</p>
+    <p>The signature is checked against the raw bytes, before parsing, always; a missing
+      secret fails closed, because a receiver that treats “no secret configured” as
+      “everything is authentic” is worse than one with no check at all. Deduplication runs
+      in two layers — on the delivery, and underneath it on the dispatch, which is the thing
+      that can be recovered once. And settlement value goes through the same call the poll
+      uses, so a re-registered mandate is a year of billing whichever way the news arrives.</p>
+    <p class="surface-note" style="margin-top:1.4rem"><strong>One caveat, stated rather than
+      buried.</strong> Receiving a real delivery needs a public URL, which a walkthrough on a
+      laptop does not have — so the sample above is signed locally. The verification, the
+      matching and the crediting are the real ones. Only the postman is simulated.</p>
+    <p style="margin-top:1.5rem">Building it surfaced a bug that had been in the adapter
+      since it was written. The record of what went out lived only in memory, so a process
+      that sent a link and then died had lost its only handle on it — and a payment landing
+      on that link could never be credited by either path. An already-sent action now looks
+      its reference back up. Probed rather than assumed: payment links filter on their
+      reference, orders on their receipt. Authorisation links do not come back from the
+      invoice listing at all, so that one is stated as a gap rather than guessed at.</p>
   </section>
 
   <hr class="rule-line">
@@ -529,14 +631,17 @@ python -m backstop.demo --offline
 python -m backstop.demo --stage policy
 
 <span class="c"># the four-arm measurement</span>
-python -m backstop.evaluation.backtest</pre>
+python -m backstop.evaluation.backtest
+
+<span class="c"># the queue, the webhook receiver, and a real dispatch — needs test-mode keys</span>
+python -m backstop.demo --stage razorpay</pre>
     </div>
   </section>
 
   <footer>
     <span>Backstop</span>
     <span>Razorpay AI Buildathon 2026</span>
-    <span>343 tests · lint clean</span>
+    <span>393 tests · lint clean</span>
   </footer>
 
 </div>
