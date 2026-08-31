@@ -340,18 +340,84 @@ def test_a_replay_is_not_charged_for():
     assert ex.execute(act(), NOW).cost == Money.zero()
 
 
+DUPLICATE_LINK = ApiResponse(400, {"error": {"description": (
+    "payment link with given reference_id: bkstp_x already exists. "
+    "Please create a payment link with a different reference_id"
+)}})
+
+
 def test_razorpay_refusing_a_duplicate_reference_is_not_an_error():
     """A previous process already sent this one. That is a successful
     outcome for the customer -- one message -- and must not raise."""
-    t = transport(**{
-        LINK: [ApiResponse(400, {"error": {"description": (
-            "payment link with given reference_id: bkstp_x already exists. "
-            "Please create a payment link with a different reference_id"
-        )}})]
-    })
+    t = transport(**{LINK: [DUPLICATE_LINK],
+                     "GET /payment_links": [ok({"payment_links": []})]})
     result = executor(t).execute(act(), NOW)
     assert result.outcome is Outcome.NO_EFFECT
     assert "not sent twice" in result.detail
+
+
+def test_an_already_sent_link_is_recovered_so_it_stays_reconcilable():
+    """The restart hole, closed.
+
+    `dispatched` lives in memory. A process that sends a link and then dies
+    has lost its only handle on the thing that went out, and a payment landing
+    on that link could never be credited -- not by a poll, which has nothing
+    to poll, and not by a webhook, which would find no matching dispatch and
+    correctly refuse to credit a stranger. Looking the reference back up is
+    what makes "already sent" recoverable rather than merely declined.
+    """
+    t = transport(**{
+        LINK: [DUPLICATE_LINK],
+        "GET /payment_links": [ok({"payment_links": [
+            {"id": "plink_OLD", "short_url": "https://rzp.io/rzp/OLD"}
+        ]})],
+    })
+    ex = executor(t)
+    result = ex.execute(act(), NOW)
+
+    assert result.outcome is Outcome.NO_EFFECT, "still not a second send"
+    assert result.external.id == "plink_OLD"
+    assert "reconcilable again" in result.detail
+    assert len(ex.pending) == 1, "and now it can be reconciled"
+
+
+def test_a_recovered_dispatch_can_then_be_credited():
+    """The point of recovering it: the loop closes after a restart."""
+    t = transport(**{
+        LINK: [DUPLICATE_LINK],
+        "GET /payment_links": [ok({"payment_links": [{"id": "plink_OLD"}]})],
+    })
+    ex = executor(t)
+    ex.execute(act(), NOW)
+    t.routes["GET /payment_links/:id"] = [
+        ok({"id": "plink_OLD", "status": "paid", "amount_paid": 120000})
+    ]
+    settled = ex.reconcile(at=NOW)
+    assert len(settled) == 1
+    assert settled[0].recovered == Money.rupees(1200)
+
+
+def test_an_already_sent_link_that_cannot_be_found_is_still_not_resent():
+    """A failed lookup must not become a second message to a customer."""
+    t = transport(**{LINK: [DUPLICATE_LINK],
+                     "GET /payment_links": [ApiResponse(500, {"error": {}})]})
+    result = executor(t).execute(act(), NOW)
+    assert result.outcome is Outcome.NO_EFFECT
+    assert result.external is None
+
+
+def test_a_duplicate_auth_link_is_honestly_unrecoverable():
+    """Auth links are invoices of type `link`; they do not come back from
+    `GET /invoices` and there is no filter for their receipt. Guessing at one
+    would risk reconciling against somebody else's invoice, so the adapter
+    declines to and the limit is stated rather than papered over."""
+    t = transport(**{AUTH: [ApiResponse(400, {"error": {
+        "description": "receipt must be unique"}})]})
+    ex = executor(t)
+    result = ex.execute(act(ActionType.REQUEST_MANDATE_REREGISTRATION, subject="sub_1"), NOW)
+    assert result.outcome is Outcome.NO_EFFECT
+    assert result.external is None
+    assert ex.pending == []
 
 
 def test_an_unrelated_bad_request_still_raises():

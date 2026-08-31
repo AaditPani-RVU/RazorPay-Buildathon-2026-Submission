@@ -21,8 +21,11 @@ assertion.
 ## Pipeline
 
 ```
-Detect  ->  Diagnose  ->  Decide  ->  Enforce  ->  Execute  ->  Measure
-(stats)     (LLM)         (LLM)       (rules)      (adapter)   (backtest)
+Detect -> Diagnose -> Decide -> Enforce -> Execute -> Measure
+(stats)   (LLM)       (LLM)     (rules)    (adapter)  (backtest)
+                                   |          ^
+                                Approve    Reconcile
+                              (a person)   (webhooks)
 ```
 
 - **Detect** — three scans for three shapes of failure: segmented success-rate
@@ -34,8 +37,15 @@ Detect  ->  Diagnose  ->  Decide  ->  Enforce  ->  Execute  ->  Measure
   Messy multi-signal attribution is where a model genuinely earns its place.
 - **Decide** — a plan drawn from a typed action catalog, never free text.
 - **Enforce** — the deterministic policy engine. The heart of the system.
+- **Approve** — what the rules will not let automation decide alone waits for a
+  person. An approval discharges the `require_approval` verdict and nothing
+  else; the rules run again at release, and an unanswered request expires
+  rather than firing.
 - **Execute** — two backends behind one protocol: the simulator the measurement
   runs on, and a Razorpay test-mode adapter that really dispatches.
+- **Reconcile** — a dispatch is not a recovery. A signature-verifying webhook
+  receiver credits what actually settled, and only for entities recovery itself
+  dispatched.
 - **Measure** — replay one labelled batch through four arms and report the delta,
   on each surface separately and never summed.
 
@@ -355,6 +365,112 @@ backtest executes those, on its stated assumption that a merchant staffs the
 queue. A live adapter may not make that assumption on somebody's behalf — an
 approval gate that sends while it waits is not a gate.
 
+### The queue behind the gate
+
+Which raises the question of where a held action actually goes.
+`REQUIRE_APPROVAL` was the one disposition with nowhere to be: the engine
+produced it, the ledger counted it, the backtest executed it on that stated
+assumption, and the live walkthrough correctly refused to send it and then
+dropped it. A gate with nothing behind it is a deletion. `approve/queue.py` is
+what is behind it, and four of its properties each cost the recovery number
+something.
+
+**An approval is permission from a person, not an exemption from the rules.**
+A release re-evaluates the action against all sixteen rules in the world that
+holds *at release time*, not the one that held when it was queued. Time passes
+while a request sits: a customer's fortnight contact budget fills, an hour
+becomes a quiet hour, a mandate gets revoked, an invoice goes into dispute. A
+queue that dispatched whatever a reviewer approved on Tuesday would be a hole
+in the policy engine exactly the width of the queue, and every guarantee above
+would carry a silent asterisk. So `DENY` still denies after a yes, and the
+reviewer is told which rule overtook their decision. What the approval *does*
+discharge is the `require_approval` verdict itself — that is the entire content
+of the human decision, and re-raising it would make every approved action
+immortal in the queue.
+
+**Silence is not consent.** Requests expire, and expiry is recorded as an
+outcome rather than a silent drop. This is what makes the backtest's
+assumption falsifiable instead of merely convenient: a merchant who does not
+staff the desk does not thereby get the revenue, they get a pile of expired
+requests, and the money is reported as given up. On seed 1's live sample, 430
+actions are held, one is answered, and 429 expire — revenue foregone by a
+*staffing* decision, as visible as revenue foregone by a rule.
+
+**Every decision names a human being.** `decided_by` is not optional and there
+is no auto-approve. The backtest's assumption that somebody is at the desk is
+expressed as a `StandingApproval` — a named reviewer with a stated latency and
+a staffing rate, deterministic from the request id so that every arm and every
+re-run sees the same desk. An assumption written as a reviewer is one a reader
+can see and argue with.
+
+**Asking twice is not allowed.** A request's identity is `reference_for` — the
+same fingerprint that gives the adapter its idempotency, derived from the
+action's verb, subject, moment, channel and amount and deliberately not from
+its `rationale`. Re-running a plan finds the request a reviewer has already
+seen; a model rewording its own justification cannot manufacture a fresh ask.
+
+### Webhooks, and what a receiver must refuse
+
+`reconcile()` polls, and polling is the wrong shape for the job — a dispatch
+settles when a human opens a link, so a poll either runs constantly and mostly
+learns nothing or runs rarely and reports recovery long after it happened.
+`execute/webhook.py` takes the push instead. It is bytes in, verdict out: no
+server and no framework, so a deployment can front it with anything and the
+test suite can exercise it with no network at all.
+
+A receiver is the one place in this system where an *outsider* proposes a
+change to the revenue number, so it is written as a list of refusals.
+
+**It verifies before it parses**, against the raw bytes, always. Parsing first
+would hand unauthenticated JSON to the parser; re-serialising a parsed body to
+check the signature breaks on key order and quietly tempts somebody to skip
+the check. `receive` takes `bytes` and there is no overload that takes a dict.
+An absent secret fails closed — a receiver that treats "no secret configured"
+as "everything is authentic" is worse than one with no check at all, because
+it looks like it has one.
+
+**It credits only what recovery dispatched.** A merchant's own dashboard-created
+payment links are paid all day; that is real revenue and recovery caused none
+of it. A receiver that credited every `payment_link.paid` on the account would
+make exactly the error the receivables surface exists to warn about — measuring
+the world's ordinary behaviour and booking it as the agent's work. This is the
+counterfactual argument arriving over HTTP, and it is one line of the
+walkthrough's output.
+
+**It credits once, in two layers.** Razorpay redelivers on any non-2xx, and
+`order.paid` and `payment_link.paid` can both describe one settlement — so
+deduplication on the event id is only an optimisation, and the load-bearing
+layer is on the *dispatch*, which is the thing that can be recovered once. An
+unmatched or duplicate event answers 200, because it was handled correctly and
+redelivering it forever would not improve the answer; only a signature failure
+is a 400.
+
+**It does not decide what money is worth.** Settlement value goes through
+`RazorpayExecutor.credit`, the same call the poll uses, so a re-registered
+mandate is a year of billing whichever way the news arrives. Two paths with
+their own opinions would make the recurring number a function of network
+timing.
+
+### The restart hole, found by the demo
+
+Building the receiver surfaced a bug in the adapter that had been there since
+it was written. `dispatched` lives in memory, and a reference Razorpay already
+holds was reported as "not sent twice" and otherwise forgotten — so a process
+that sent a link and then died had lost its only handle on the thing that went
+out. A payment landing on that link could never be credited: not by a poll,
+which had nothing to poll, and not by a webhook, which would find no matching
+dispatch and correctly refuse to credit a stranger.
+
+So an already-sent action now looks its reference back up and re-registers the
+dispatch. Probed rather than assumed, on 2026-08-31: `GET /payment_links` takes
+a `reference_id` filter and returns the one link, and `GET /orders` takes
+`receipt` — the lookup the charging path already pays for on the way in. Auth
+links are the honest gap: they are invoices of type `link`, they do not come
+back from `GET /invoices`, and there is no filter for the receipt they were
+created with, so a re-registration dispatched by a process that has since died
+cannot be recovered. Guessing at one risks reconciling against somebody else's
+invoice, so the adapter declines and says so.
+
 ## Status
 
 **Built:** all three revenue surfaces, end to end and all three *measured* --
@@ -362,15 +478,18 @@ domain model, LLM layer, seeded generator with labelled incidents,
 multi-resolution detection with scope correlation, mandate lifecycle scanning,
 receivables aging, a recovery playbook for each surface, LLM diagnosis, a
 16-rule policy engine, the planner, the ledger, the four-arm backtest reported
-per surface, and two execution backends behind one protocol -- the simulator
-that the measurement runs on, and a Razorpay test-mode adapter that really
-dispatches. 343 tests, and the repo is lint clean.
+per surface, two execution backends behind one protocol -- the simulator that
+the measurement runs on, and a Razorpay test-mode adapter that really
+dispatches -- an approval queue that holds what the engine will not let
+automation decide alone, and a signature-verifying webhook receiver that closes
+the loop without polling. 393 tests, and the repo is lint clean.
 
-**Not built:** reconciliation is a poll. Razorpay pushes `payment_link.paid`
-and `order.paid` webhooks, which would close the loop without asking; the
-`reconcile()` seam is where that lands. And nothing schedules a plan across
-real time -- the walkthrough dispatches immediately, where a deployment would
-hold each action until its `scheduled_at`.
+**Not built:** nothing schedules a plan across real time -- the walkthrough
+dispatches immediately, where a deployment would hold each action until its
+`scheduled_at`. And the webhook receiver is exercised against a locally signed
+delivery, because receiving one from Razorpay needs a public endpoint a
+walkthrough on a laptop does not have; the verification, matching and crediting
+are the real ones, and only the postman is simulated.
 
 ## Seeing it run
 
@@ -401,6 +520,7 @@ that stage along with the model calls.
 uv venv --python 3.13 .venv
 uv pip install -e ".[dev]"
 cp .env.example .env    # add GROQ_API_KEY; RAZORPAY_* keys drive the live stage
+                        # RAZORPAY_WEBHOOK_SECRET verifies pushed deliveries
 .venv/bin/python -m pytest -q
 ```
 

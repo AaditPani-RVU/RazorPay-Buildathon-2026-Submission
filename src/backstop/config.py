@@ -39,6 +39,7 @@ class Settings:
     groq_api_key: str | None
     razorpay_key_id: str | None
     razorpay_key_secret: str | None
+    razorpay_webhook_secret: str | None
     reasoning_model: str
     fast_model: str
 
@@ -49,6 +50,7 @@ class Settings:
             groq_api_key=os.environ.get("GROQ_API_KEY") or None,
             razorpay_key_id=os.environ.get("RAZORPAY_KEY_ID") or None,
             razorpay_key_secret=os.environ.get("RAZORPAY_KEY_SECRET") or None,
+            razorpay_webhook_secret=os.environ.get("RAZORPAY_WEBHOOK_SECRET") or None,
             reasoning_model=os.environ.get("BACKSTOP_LLM_MODEL") or REASONING_MODEL,
             fast_model=os.environ.get("BACKSTOP_FAST_MODEL") or FAST_MODEL,
         )
@@ -60,6 +62,12 @@ class Settings:
     @property
     def has_razorpay(self) -> bool:
         return bool(self.razorpay_key_id and self.razorpay_key_secret)
+
+    @property
+    def has_webhook_secret(self) -> bool:
+        """Without it the receiver refuses every delivery, which is correct:
+        an unverifiable webhook is not evidence that money arrived."""
+        return bool(self.razorpay_webhook_secret)
 
     @property
     def razorpay_is_test_mode(self) -> bool:
@@ -75,6 +83,7 @@ class Settings:
                 mark("GROQ_API_KEY", self.groq_api_key),
                 mark("RAZORPAY_KEY_ID", self.razorpay_key_id),
                 mark("RAZORPAY_KEY_SECRET", self.razorpay_key_secret),
+                mark("RAZORPAY_WEBHOOK_SECRET", self.razorpay_webhook_secret),
                 f"  reasoning model: {self.reasoning_model}",
                 f"  fast model:      {self.fast_model}",
                 f"  razorpay mode:   {'TEST' if self.razorpay_is_test_mode else 'NOT TEST MODE'}",

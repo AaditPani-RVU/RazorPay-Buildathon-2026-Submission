@@ -476,9 +476,28 @@ class RazorpayExecutor:
             ref = self._create_payment_link(action, kind, amount, reference, customer)
 
         if ref is None:
+            # Already sent, by an earlier run or an earlier process. Recover
+            # the entity it created rather than merely declining to send
+            # again: without this the dispatch is unreconcilable forever,
+            # because a restart loses the in-memory `dispatched` map and the
+            # only handle on the thing that went out is the reference. A
+            # payment that lands on a link this system sent, in a process that
+            # has since restarted, would otherwise never be credited.
+            existing = self._find_dispatched(action, reference)
+            if existing is None:
+                return ExecutionResult(
+                    action, Outcome.NO_EFFECT, at,
+                    detail="Razorpay already holds this reference; not sent twice",
+                )
+            self.dispatched[reference] = Dispatch(
+                reference, existing, action, amount, at
+            )
             return ExecutionResult(
-                action, Outcome.NO_EFFECT, at,
-                detail="Razorpay already holds this reference; not sent twice",
+                action, Outcome.NO_EFFECT, at, external=existing,
+                detail=(
+                    f"already sent as {existing.id}; not sent twice, and now "
+                    "reconcilable again"
+                ),
             )
 
         cost = self.costs.for_action(action)
@@ -509,17 +528,49 @@ class RazorpayExecutor:
             resp = self.transport.request("GET", dispatch.poll_path)
             if not resp.ok:
                 continue
-            paid, detail = self._settlement(dispatch, resp.body)
-            if paid is None:
-                continue
-            self.reconciled.add(reference)
-            out.append(
-                ExecutionResult(
-                    dispatch.action, Outcome.RECOVERED, now,
-                    recovered=paid, external=dispatch.ref, detail=detail,
-                )
-            )
+            result = self.credit(dispatch, resp.body, at=now)
+            if result is not None:
+                out.append(result)
         return out
+
+    def credit(
+        self, dispatch: Dispatch, body: dict[str, Any], *, at: datetime
+    ) -> ExecutionResult | None:
+        """Turn "the rails said something" into "this is recovered", or not.
+
+        The single path from an API body to a recovery, used by both the poll
+        above and the webhook receiver. Deliberately one function: if the two
+        arrived at their own answers, a re-registered mandate could be worth a
+        year down one path and one billing period down the other, and the
+        ledger would be reporting whichever route happened to fire first.
+
+        Returns None when the entity has not settled, or when this dispatch
+        has already been credited. Both are ordinary, not errors -- Razorpay
+        retries webhooks, and a poll can race one.
+        """
+        if dispatch.reference in self.reconciled:
+            return None
+        paid, detail = self._settlement(dispatch, body)
+        if paid is None:
+            return None
+        self.reconciled.add(dispatch.reference)
+        return ExecutionResult(
+            dispatch.action, Outcome.RECOVERED, utc(at),
+            recovered=paid, external=dispatch.ref, detail=detail,
+        )
+
+    def dispatch_for(self, entity_id: str) -> Dispatch | None:
+        """The dispatch that created a given Razorpay entity, if we made it.
+
+        Returns None for anything this process did not dispatch, and the
+        caller must treat that as "not ours" rather than as a lookup failure.
+        A merchant's own dashboard-created payment link being paid is real
+        revenue and is not *recovered* revenue.
+        """
+        for dispatch in self.dispatched.values():
+            if dispatch.ref.id == entity_id:
+                return dispatch
+        return None
 
     @property
     def pending(self) -> list[Dispatch]:
@@ -621,6 +672,43 @@ class RazorpayExecutor:
         if not resp.ok:
             raise RazorpayError(f"POST /orders: {resp.error}")
         return ExternalRef(entity="order", id=str(resp.body["id"]))
+
+    def _find_dispatched(self, action: Action, reference: str) -> ExternalRef | None:
+        """Recover the entity a previous run created for this reference.
+
+        Probed rather than assumed, on 2026-08-31: `GET /payment_links` takes
+        a `reference_id` filter and returns the one link, and `GET /orders`
+        takes `receipt` -- the same lookup the charging path already pays for
+        on the way in. Both were checked against the live test API.
+
+        Auth links are the honest gap. They are invoices of type `link`, they
+        do not come back from `GET /invoices`, and there is no documented
+        filter for the `receipt` they were created with -- so a
+        re-registration dispatched by a process that has since died cannot be
+        recovered here and returns None. Saying so is better than a lookup
+        that quietly matches the wrong invoice.
+        """
+        if action.is_charging:
+            resp = self.transport.request("GET", f"/orders?receipt={reference}")
+            items = resp.body.get("items") or [] if resp.ok else []
+            if items:
+                return ExternalRef(entity="order", id=str(items[0]["id"]))
+            return None
+        if action.type is ActionType.REQUEST_MANDATE_REREGISTRATION:
+            return None
+        resp = self.transport.request(
+            "GET", f"/payment_links?reference_id={reference}"
+        )
+        if not resp.ok:
+            return None
+        items = resp.body.get("payment_links") or resp.body.get("items") or []
+        if not items:
+            return None
+        return ExternalRef(
+            entity="payment_link",
+            id=str(items[0]["id"]),
+            url=str(items[0].get("short_url") or ""),
+        )
 
     def _create_payment_link(
         self,

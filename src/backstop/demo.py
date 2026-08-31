@@ -29,7 +29,7 @@ own output could not demonstrate that. The probes are labelled as probes.
 from __future__ import annotations
 
 import argparse
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 
 from rich.console import Console
 from rich.table import Table
@@ -610,13 +610,18 @@ def stage_razorpay(scenario, *, notify: bool) -> None:
     """
     rule("6. EXECUTE  the same actions, on Razorpay's test-mode rails")
 
+    from dataclasses import replace
+
+    from backstop.approve import ApprovalQueue, ReleaseOutcome
     from backstop.decide.planner import mandate_actions, receivable_actions, tail_actions
     from backstop.execute.razorpay import (
         HttpTransport,
         RazorpayError,
         RazorpayExecutor,
         capabilities,
+        reference_for,
     )
+    from backstop.ledger.ledger import Surface
 
     settings = Settings.load()
     if not settings.has_razorpay:
@@ -690,7 +695,10 @@ def stage_razorpay(scenario, *, notify: bool) -> None:
 
         console.print("[bold]three permitted actions, one per surface[/bold]\n")
         dispatched = 0
-        held = 0
+        queue = ApprovalQueue()
+        # The context each held action was judged in, so a release can be
+        # re-judged against the same subject at a later clock.
+        held_ctx: dict[str, PolicyContext] = {}
         for surface, candidates in streams:
             chosen = None
             for action, ctx in candidates:
@@ -702,12 +710,19 @@ def stage_razorpay(scenario, *, notify: bool) -> None:
                 # question is what recovery is worth if a merchant staffs the
                 # queue. Here there is a real person who has not said yes yet,
                 # and sending anyway would make the approval gate decorative.
+                #
+                # The scan does not stop at the first dispatchable action: it
+                # keeps going to collect what the engine sends to a person,
+                # because the queue is a property of the whole candidate pool
+                # and not of whatever happened to precede one dispatch.
                 if ruling.disposition is Disposition.REQUIRE_APPROVAL:
-                    held += 1
+                    request = queue.submit(
+                        action, ruling, surface=Surface(surface), at=now
+                    )
+                    held_ctx[request.id] = ctx
                     continue
-                if ruling.allowed:
+                if ruling.allowed and chosen is None:
                     chosen = (action, ruling)
-                    break
             if chosen is None:
                 console.print(f"  [yellow]{surface}[/yellow]  nothing permitted in the sample\n")
                 continue
@@ -732,14 +747,72 @@ def stage_razorpay(scenario, *, notify: bool) -> None:
             console.print(f"    [dim]{result.detail}[/dim]\n")
             dispatched += int(result.outcome.value == "dispatched")
 
-        if held:
+        pending = queue.pending(now)
+        if pending:
             console.print(
-                f"  [magenta]{held} candidate{'s' if held > 1 else ''} held for "
-                "approval and not dispatched[/magenta]\n"
-                "  [dim]The backtest executes those, on the stated assumption that a\n"
+                f"  [magenta]{len(pending)} candidate{'s' if len(pending) > 1 else ''} "
+                "held for approval, and queued rather than dropped[/magenta]\n"
+                "  [dim]The backtest executes these, on the stated assumption that a\n"
                 "  merchant staffs the queue. A live adapter may not make that\n"
-                "  assumption on somebody's behalf: an approval gate that sends while\n"
-                "  it waits is not a gate.[/dim]\n"
+                "  assumption on somebody's behalf -- an approval gate that sends while\n"
+                "  it waits is not a gate -- so here they wait for a person.[/dim]\n"
+            )
+            for request in pending[:3]:
+                console.print(f"    [magenta]{request.describe()}[/magenta]")
+            console.print()
+
+            # A reviewer answers one of them, four hours later. Everything else
+            # is left alone on purpose, to show what an unstaffed desk costs.
+            later = now + timedelta(hours=4)
+            answered = pending[0]
+            queue.approve(
+                answered.id, by="ops@merchant.test", at=later,
+                note="checked the buyer's history by hand",
+            )
+            console.print(
+                f"  [bold]a person answers[/bold]  ops@merchant.test approves "
+                f"{answered.action.type.value} on {answered.action.subject_id}"
+            )
+
+            def context_for(action: Action) -> PolicyContext | None:
+                ctx = held_ctx.get(reference_for(action))
+                return replace(ctx, now=later) if ctx else None
+
+            for release in queue.release(engine, context_for, at=later):
+                if release.outcome is ReleaseOutcome.REFUSED:
+                    console.print(
+                        f"  [red]refused anyway[/red]  {release.blocking_rule} "
+                        "overtook the approval between the ask and the release"
+                    )
+                    continue
+                word = (
+                    "released" if release.outcome is ReleaseOutcome.RELEASED
+                    else "released, rescheduled"
+                )
+                console.print(f"  [green]{word}[/green]  {release.action.describe()}")
+                try:
+                    result = executor.execute(
+                        release.action, utc(release.action.scheduled_at)
+                    )
+                except RazorpayError as err:
+                    console.print(f"    [red]razorpay   {err}[/red]")
+                    continue
+                console.print(f"    outcome    {result.outcome.value}")
+                if result.external:
+                    console.print(f"    created    {result.external.describe()}")
+                dispatched += int(result.outcome.value == "dispatched")
+
+            expired = queue.expire_due(now + timedelta(days=3))
+            console.print(
+                f"\n  [yellow]{len(expired)} expired unanswered[/yellow]  "
+                "[dim]one was answered above, on purpose[/dim]\n"
+                "  [dim]Recorded as expired rather than dropped, and credited to\n"
+                "  nobody. Silence is not consent, and revenue given up by a\n"
+                "  staffing decision should be as visible as revenue given up by a\n"
+                "  rule. An approval is permission from a person, not an exemption\n"
+                "  from the rules -- the release above re-ran all "
+                f"{len(engine.rules)} of them at the\n"
+                "  later clock, and a DENY would still have won.[/dim]\n"
             )
 
         settled = executor.reconcile()
@@ -755,6 +828,8 @@ def stage_razorpay(scenario, *, notify: bool) -> None:
             "  four-arm measurement above runs on the simulator -- reality has no\n"
             "  counterfactual, and an arm with no counterfactual cannot be scored.[/dim]"
         )
+
+        show_webhook(executor)
         if dispatched and not notify:
             console.print(
                 "\n  [dim]Nothing was sent to anybody: notifications are off unless\n"
@@ -766,12 +841,99 @@ def stage_razorpay(scenario, *, notify: bool) -> None:
     console.print()
 
 
+def show_webhook(executor) -> None:
+    """Close the loop the other way round: Razorpay tells us, we do not ask.
+
+    An honest caveat first, because the rest of this project states its limits
+    rather than burying them. Receiving a *real* webhook needs a public URL
+    Razorpay can reach, and a walkthrough on somebody's laptop has none. So the
+    delivery below is constructed locally and signed with a local secret. What
+    is real is everything after the signature check: the same receiver, the
+    same verification, the same matching against what was actually dispatched,
+    and the same crediting path the poll uses. What is simulated is only the
+    postman.
+    """
+    import hashlib
+    import hmac
+    import json
+
+    from backstop.execute.webhook import WebhookReceiver
+
+    pending = executor.pending
+    if not pending:
+        return
+
+    console.print("\n[bold]a webhook arrives[/bold]  [dim]locally signed sample[/dim]\n")
+    secret = "whsec_walkthrough_only"
+    receiver = WebhookReceiver(executor=executor, secret=secret)
+    dispatch = pending[0]
+
+    # The event name has to match what the dispatch actually created: an auth
+    # link is an invoice, dunning is a payment link, a re-presentment is an
+    # order, and the receiver refuses a delivery whose kind disagrees with the
+    # entity it names.
+    kind = dispatch.ref.entity
+
+    def deliver(entity_id: str, event_id: str, *, entity_kind: str = kind):
+        body = json.dumps({
+            "entity": "event",
+            "event": f"{entity_kind}.paid",
+            "contains": [entity_kind],
+            "payload": {entity_kind: {"entity": {
+                "id": entity_id, "status": "paid",
+                "amount_paid": dispatch.amount.paise,
+            }}},
+            "created_at": int(datetime.now(UTC).timestamp()),
+        }).encode()
+        signature = hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+        return receiver.receive(body, signature, event_id=event_id)
+
+    forged = receiver.receive(b'{"event":"payment_link.paid"}', "deadbeef")
+    console.print(
+        f"  [red]{forged.verdict.value:<10}[/red] a body signed with the wrong secret "
+        f"-> HTTP {forged.status}"
+    )
+
+    stranger = deliver("plink_not_ours", "evt_stranger", entity_kind="payment_link")
+    console.print(
+        f"  [yellow]{stranger.verdict.value:<10}[/yellow] a link the merchant created "
+        f"themselves -> HTTP {stranger.status}"
+    )
+
+    ours = deliver(dispatch.ref.id, "evt_ours")
+    colour = "green" if ours.is_recovery else "yellow"
+    console.print(
+        f"  [{colour}]{ours.verdict.value:<10}[/{colour}] {dispatch.ref.id} "
+        f"-> {ours.result.recovered if ours.result else 'nothing'}"
+    )
+
+    replay = deliver(dispatch.ref.id, "evt_ours")
+    console.print(
+        f"  [dim]{replay.verdict.value:<10}[/dim] the same delivery again "
+        f"-> HTTP {replay.status}, credited nothing"
+    )
+
+    console.print(
+        "\n  [dim]The middle line is the whole counterfactual argument arriving over\n"
+        "  HTTP. A merchant's own payment links are paid all day; that is real\n"
+        "  revenue and recovery caused none of it, and a receiver that credited\n"
+        "  every payment_link.paid on the account would book the merchant's\n"
+        "  ordinary business as its own work. Only an entity this process\n"
+        "  dispatched is a recovery.[/dim]\n"
+    )
+
+
 def stage_gaps() -> None:
     rule("NOT BUILT YET")
     console.print(
-        "  [yellow]webhooks[/yellow]  reconciliation is a poll. Razorpay will push\n"
-        "            payment_link.paid and order.paid, which would close the loop\n"
-        "            without asking.\n"
+        "  [yellow]scheduling[/yellow]  nothing holds a plan across real time. Every\n"
+        "              action carries a scheduled_at the rules can move, and the\n"
+        "              walkthrough dispatches immediately regardless. A deployment\n"
+        "              would wait.\n"
+        "  [yellow]a real URL[/yellow]  the webhook receiver is exercised against a\n"
+        "              locally signed delivery, because receiving one from Razorpay\n"
+        "              needs a public endpoint this walkthrough does not have. The\n"
+        "              verification, matching and crediting are the real ones.\n"
     )
 
 
