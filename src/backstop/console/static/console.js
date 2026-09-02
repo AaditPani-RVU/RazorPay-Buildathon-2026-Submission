@@ -350,7 +350,8 @@ async function loadApprovals() {
       </div>
     </div>`
     )
-    .join('');
+    .join('') ||
+    `<div class="card"><div class="why">Nothing ${esc(chosen)} at this clock.</div></div>`;
   $('#approvallist').dataset.ids = data.requests
     .filter((r) => r.state === 'pending')
     .map((r) => r.id)
