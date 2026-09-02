@@ -282,7 +282,7 @@ footer {
       surface it works, and breaks zero rules doing it — because every action it takes is
       ruled on by code, not by a prompt.</p>
     <p class="byline eyebrow">
-      <span>Backstop</span><span>3 revenue surfaces</span><span>16 policy rules</span><span>451 tests</span>
+      <span>Backstop</span><span>3 revenue surfaces</span><span>16 policy rules</span><span>496 tests</span>
     </p>
   </header>
 
@@ -740,6 +740,63 @@ footer {
   <hr class="rule-line">
 
   <section class="col">
+    <h2>Two of these properties cannot be printed</h2>
+    <p class="lede">A transcript scrolls past in a second. A deferral landing and an
+      approval being overruled are things that happen <em>in time</em>, and neither
+      survives being flattened into a log.</p>
+    <p>So there is a console: a browser over the same objects, running the same engine,
+      reading the same ledger. It is a viewer and a set of controls, not a second
+      implementation — no route in it decides anything, because a safety boundary
+      somebody could reach around by adding an HTTP handler would not be one.</p>
+    <p><strong>It rules on two plans at once.</strong> The argument this system makes is
+      comparative: same rules, same contexts, same moments, and the only difference is
+      whether the rulings are obeyed. A stream drawn from Backstop’s own playbook makes
+      that argument badly — a good planner rarely proposes anything the rules must
+      refuse, so on a sample of 450 subjects it draws nine denials against 510
+      permissions, and a page showing only that is a boundary holding back nothing. The
+      naive plan is ruled beside it, in the same engine, and lights eleven of the sixteen
+      rules. It is displayed and dispatched nowhere; a console is not a place to run an
+      unpoliced arm at a person.</p>
+    <p><strong>It moves a clock.</strong> Advancing it is the loop a deployment would run
+      against real time, with the waiting taken out. Actions come due and are re-ruled at
+      the moment they land; deferrals go back into the queue with their new time;
+      approvals nobody answered expire on the hour they expire. That last one is the
+      backtest’s staffing assumption made falsifiable rather than convenient — a merchant
+      who does not staff the desk does not get the revenue, they get a pile of expired
+      requests.</p>
+    <p><strong>And it can show an approval being overruled</strong>, which is the one
+      property of the queue a screenshot cannot assert. Approve everything pending, let
+      eighteen hours pass, release: the rules refuse three of them, because the buyer
+      committed to a payment date in the interval between the ask and the answer.</p>
+    <div class="run">
+<pre><span class="c">seed 1, a 450-subject sample — the console opens on this</span>
+
+  backstop   510 <span style="color:var(--allow)">allow</span>   14 <span style="color:var(--resched)">reschedule</span>   161 <span style="color:var(--approval)">require_approval</span>     9 <span style="color:var(--deny)">deny</span>
+  naive      349 <span style="color:var(--allow)">allow</span>  237 <span style="color:var(--resched)">reschedule</span>   181 <span style="color:var(--approval)">require_approval</span>   733 <span style="color:var(--deny)">deny</span>
+
+<span class="c">run the clock out with nobody at the desk</span>
+
+  342 fired · 0 fired early · 0 dropped as stale · 161 approvals expired unanswered
+
+<span class="c">or approve all 161, wait eighteen hours, then release</span>
+
+  <span style="color:var(--allow)">released</span>  158
+  <span style="color:var(--deny)">refused</span>     3  promise_to_pay — the buyer committed to a date while the request sat</pre>
+    </div>
+    <p class="surface-note" style="margin-top:1rem">The clock starts at the earliest
+      moment the plan asks for rather than at “now”, because the batch is historical and a
+      plan drawn against it is drawn for moments that have already passed. Read the clock
+      the other way and the scheduler is quite right to drop the whole plan as stale — the
+      console would open on 239 actions it had already given up on. The live tab binds the
+      test-mode adapter, rules on an action again at the moment the button is pressed, and
+      returns a payment link that opens; <code>POST /webhooks/razorpay</code> is the
+      receiver with a server in front of it at last, raw bytes through, signature checked
+      before anything parses them.</p>
+  </section>
+
+  <hr class="rule-line">
+
+  <section class="col">
     <h2>What these numbers are not</h2>
     <p>Recovery rates in <code>simulate/recoverability.py</code> are stated configuration,
       not measured from Razorpay traffic. No real transaction data exists for this, so the
@@ -751,10 +808,13 @@ footer {
       so it cannot mark its own homework.</p>
     <h3 style="margin-top:2rem">Run it yourself</h3>
     <div class="run">
-<pre><span class="c"># the full walkthrough, 20 seconds, ground truth beside every prediction</span>
+<pre><span class="c"># the operator console: two plans, a clock you can push, a live dispatch</span>
+python -m backstop.console
+
+<span class="c"># the full walkthrough, 20 seconds, ground truth beside every prediction</span>
 python -m backstop.demo --offline
 
-<span class="c"># just the safety boundary — fourteen probes, including ones that must be refused</span>
+<span class="c"># just the safety boundary — sixteen probes, including ones that must be refused</span>
 python -m backstop.demo --stage policy
 
 <span class="c"># the four-arm measurement</span>
@@ -771,7 +831,7 @@ python -m backstop.demo --stage restart</pre>
   <footer>
     <span>Backstop</span>
     <span>Razorpay AI Buildathon 2026</span>
-    <span>451 tests · lint clean</span>
+    <span>496 tests · lint clean</span>
   </footer>
 
 </div>

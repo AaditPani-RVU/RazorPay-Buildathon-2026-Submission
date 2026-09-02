@@ -54,6 +54,10 @@ Detect -> Diagnose -> Decide -> Enforce -> Schedule -> Execute -> Measure
 - **Journal** — what the live path holds is written down as it happens, because
   a held action, an unspent approval and an already-credited settlement all
   mean nothing if a restart forgets them.
+- **Console** — a browser over the same objects, because a deferral landing and
+  an approval being overruled are things that happen *in time* and a transcript
+  cannot show either. It decides nothing; it reads the ledger and calls the
+  methods the walkthrough calls.
 
 ## What it measures
 
@@ -615,6 +619,86 @@ system names the rule that produced it, and this one produced no record at all
 identical to a planner that never proposed it. The deferral path now names its
 rule too, for the same reason.
 
+### Watching it happen
+
+Everything above is true of a process that runs to completion and prints. Some
+of it cannot be *seen* that way, and two of the properties this system is built
+around are among them.
+
+A held action is one. `quiet_hours`, `retry_spacing` and `outage_hold` exist to
+move an action rather than refuse it, and a transcript that scrolls past in a
+second cannot show a deferral landing. An overruled approval is the other: the
+queue's central claim is that a reviewer's yes discharges the
+`require_approval` verdict and nothing else, and demonstrating that needs
+somebody to say yes and then time to pass.
+
+`console/` is a browser surface over the same objects. It is a viewer and a set
+of controls, not a second implementation: no route decides anything, and every
+figure on it is read off the ledger, the queue or the scheduler that the
+measurement reports from.
+
+```bash
+.venv/bin/python -m backstop.console            # http://127.0.0.1:8000
+.venv/bin/python -m backstop.console --seed 4 --sample 300
+.venv/bin/python -m backstop.console --cold     # start empty, generate from the page
+```
+
+Four things it does that the walkthrough cannot.
+
+**It rules on two plans at once.** The engine's argument is comparative --
+same rules, same contexts, same moments, and the only difference is whether
+the rulings are obeyed. A stream drawn from Backstop's own playbook makes that
+argument badly, because a good playbook rarely proposes anything the rules
+must refuse: on a sample of 450 subjects it draws nine denials and 510
+permissions, and a page showing only that is a safety boundary holding back
+nothing. The naive plan is ruled beside it, in the same engine, and lights
+eleven of the sixteen rules -- 733 denials, including every stolen card, every
+revoked mandate and every disputed invoice. It is displayed and dispatched
+nowhere; a console is not a place to run an unpoliced arm at a person.
+
+**It moves a clock.** Advancing it is the loop a deployment would run against
+real time with the waiting taken out. Actions come due and are re-ruled at the
+moment they land, deferrals go back into the queue with their new time,
+approvals nobody answered expire on the hour they expire. On seed 1 the
+console opens holding 405 scheduled actions and 161 approval requests; run the
+clock out and 342 fire, and every one of the 161 expires unanswered unless
+somebody is at the desk. That is the backtest's staffing assumption made
+falsifiable rather than convenient.
+
+**It shows an approval being overruled.** Approve every pending request, let
+eighteen hours pass, then release: 158 are permitted and three are refused by
+`promise_to_pay`, because the buyer committed to a payment date in the interval
+between the ask and the answer. The reviewer is told which rule overtook them.
+This is the one property of the approval queue that a screenshot cannot assert
+and a transcript cannot stage.
+
+**It dispatches, and it receives.** The live tab binds the Razorpay test-mode
+adapter, probes what the key can reach, and sends one permitted action per
+surface -- ruled on again at the moment the button is pressed, because the
+action was permitted for a moment and this is a different one. What comes back
+is a real `plink_...` with a URL that opens. And `POST /webhooks/razorpay` is
+the receiver with a server in front of it at last: raw bytes through to
+`execute/webhook.py`, signature checked against those bytes before anything
+parses them, and the status Razorpay is told is the one the receipt asks for.
+
+The clock starts at the earliest moment the plan asks for rather than at the
+end of the batch, for the reason the walkthrough starts its clock the same way:
+the batch is historical, so a plan drawn against it is drawn for moments that
+have already passed. Read the clock as `now` and the scheduler is quite right
+to drop the entire plan as stale, and the console would open on 239 actions it
+had already given up on.
+
+Two things were pulled out of the walkthrough on the way, because two callers
+were about to do them differently. `policy/subjects.py` resolves an action's
+subject to a surface and its entities -- a mandate presentation that failed is
+an order *and* belongs to a subscription, and two callers resolving that
+differently would report different verdicts from an engine that behaved
+identically. `policy/probes.py` is the fixed bench of sixteen actions the engine
+must keep ruling on the same way, each naming a real subject from the batch and
+each carrying its expected disposition. The demo and the console both run it;
+the test suite asserts it across three seeds, so a rule that quietly stops
+denying something fails a test rather than printing a line nobody reads.
+
 ## Status
 
 **Built:** all three revenue surfaces, end to end and all three *measured* --
@@ -628,23 +712,28 @@ dispatches -- an approval queue that holds what the engine will not let
 automation decide alone, a scheduler that holds every action until its own
 moment and re-rules it there, a signature-verifying webhook receiver that
 closes the loop without polling, and a journal that carries all three across a
-restart without firing anything early or crediting anything twice. 451 tests,
-and the repo is lint clean.
+restart without firing anything early or crediting anything twice, and an
+operator console that puts a browser over all of it -- two plans ruled side by
+side, a clock a person can push, an approval that can be overruled after it is
+given, a live dispatch that comes back as an openable link, and the webhook
+receiver behind a real endpoint. 496 tests, and the repo is lint clean.
 
-**Not built:** the webhook receiver is exercised against a locally signed
-delivery, because receiving one from Razorpay needs a public endpoint a
-walkthrough on a laptop does not have; the verification, matching and crediting
-are the real ones, and only the postman is simulated. Nothing ticks the
-scheduler on a timer -- the walkthrough steps a clock to each scheduled moment,
-and a deployment would run the same loop against the same journal on a real
-one. And the journal is a file, so it assumes one writer: two schedulers on it
-would interleave snapshots and the last would win. That wants a database, and
-the components take the store as a constructor argument so swapping one in is
-not a rewrite.
+**Not built:** the webhook receiver now has a server in front of it, and no
+public address -- Razorpay needs a reachable URL, and a laptop wants a tunnel.
+The verification, matching and crediting are the real ones either way; only the
+postman is local. Nothing ticks the scheduler on a timer: the walkthrough steps
+a clock to each scheduled moment and the console gives a person the same
+buttons, and a deployment would run that loop against the same journal on a
+real clock. And the journal is a file, so it assumes one writer -- as does the
+console, which holds one session behind a lock and says so. Two schedulers on
+one file would interleave snapshots and the last would win. That wants a
+database, and the components take the store as a constructor argument so
+swapping one in is not a rewrite.
 
 ## Seeing it run
 
 ```bash
+.venv/bin/python -m backstop.console                 # the operator console, in a browser
 .venv/bin/python -m backstop.demo                    # full walkthrough, live model
 .venv/bin/python -m backstop.demo --offline          # no API calls
 .venv/bin/python -m backstop.demo --stage policy     # just the safety boundary
