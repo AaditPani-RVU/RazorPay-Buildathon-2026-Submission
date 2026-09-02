@@ -42,12 +42,13 @@ from backstop.diagnose.diagnoser import Diagnoser, DiagnosisResult
 from backstop.diagnose.evidence import EvidenceBuilder
 from backstop.domain.actions import Action, ActionType
 from backstop.domain.declines import DeclineCode, RootCause
-from backstop.domain.entities import Channel, ContactRecord, Order, utc
+from backstop.domain.entities import Channel, utc
 from backstop.domain.money import Money
 from backstop.evaluation import detection_score, diagnosis_score
 from backstop.evaluation.bench import scope_is_exact
 from backstop.llm import GroqProvider, LLMClient, ScriptedProvider
 from backstop.policy.engine import IST, Disposition, PolicyContext, PolicyEngine
+from backstop.policy.probes import bench, pick
 from backstop.simulate.generator import SimConfig, generate
 from backstop.simulate.scenario import Scenario
 
@@ -230,235 +231,40 @@ def stage_diagnose(
 # --------------------------------------------------------------------------
 
 
-def _ist(base: datetime, hour: int, minute: int = 0) -> datetime:
-    """A UTC instant that lands at the given IST wall-clock time."""
-    return base.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(
-        hours=hour - 5, minutes=minute - 30
-    )
-
-
-def _pick(orders: list[Order], code: DeclineCode, **bounds) -> Order | None:
-    lo, hi = bounds.get("above"), bounds.get("below")
-    for o in orders:
-        if o.last_decline is not code:
-            continue
-        if lo is not None and o.amount < lo:
-            continue
-        if hi is not None and o.amount >= hi:
-            continue
-        return o
-    return None
-
-
 def stage_policy(scenario: Scenario, pairs) -> None:
     rule("4. ENFORCE  the policy engine -- the safety boundary")
     console.print(
-        "[dim]Everything above is advisory. The planner that will feed this stage is not\n"
-        "built yet, so the actions below are hand-written probes: the things a planner\n"
-        "might reasonably propose, plus the things it must never be allowed to do. Each\n"
-        "one names a real order, invoice or customer from the batch above.\n\n"
+        "[dim]Everything above is advisory. A stream drawn from the planner would not show\n"
+        "this stage working -- a good planner does not propose retrying a stolen card --\n"
+        "so the actions below are the fixed bench in policy/probes.py: the things a\n"
+        "planner might reasonably propose, plus the things it must never be allowed to\n"
+        "do. Each one names a real order, invoice or customer from the batch above, and\n"
+        "each carries the ruling it is expected to get.\n\n"
         "Watch the rule ids. Every ruling names the rules that produced it, which is\n"
         "what makes 'zero policy violations' a claim about a log rather than a hope.[/dim]\n"
     )
 
     engine = PolicyEngine()
-    failed = scenario.failed_orders
-    now = scenario.ends_at
-    day = now - timedelta(days=1)
-    cust = scenario.customers
-
-    probes: list[tuple[str, str, Action, PolicyContext]] = []
-
-    def add(label, expect, action, ctx):
-        probes.append((label, expect, action, ctx))
-
-    # -- things that must never happen -----------------------------------
-    stolen = _pick(failed, DeclineCode.STOLEN_OR_LOST_CARD)
-    if stolen:
-        add(
-            "Retry a card reported stolen",
-            "DENY",
-            Action(type=ActionType.RETRY_PAYMENT, subject_id=stolen.id,
-                   scheduled_at=now + timedelta(hours=1),
-                   rationale="the amount is material and the order is unpaid"),
-            PolicyContext(now=now, order=stolen, customer=cust.get(stolen.customer_id)),
-        )
-        add(
-            "Dun the customer whose card was stolen",
-            "DENY",
-            Action(type=ActionType.SEND_DUNNING, subject_id=stolen.id,
-                   scheduled_at=_ist(day, 11), channel=Channel.EMAIL,
-                   rationale="ask them to complete payment with another method"),
-            PolicyContext(now=now, order=stolen, customer=cust.get(stolen.customer_id)),
-        )
-
-    expired = _pick(failed, DeclineCode.CARD_EXPIRED)
-    if expired:
-        add(
-            "Re-present an expired card",
-            "DENY",
-            Action(type=ActionType.RETRY_PAYMENT, subject_id=expired.id,
-                   scheduled_at=now + timedelta(hours=6),
-                   rationale="maybe it works on a second attempt"),
-            PolicyContext(now=now, order=expired, customer=cust.get(expired.customer_id)),
-        )
-
-    disputed = next((i for i in scenario.invoices if i.disputed_at), None)
-    if disputed:
-        add(
-            "Chase a disputed invoice",
-            "DENY",
-            Action(type=ActionType.SEND_DUNNING, subject_id=disputed.id,
-                   scheduled_at=_ist(day, 11), channel=Channel.EMAIL,
-                   rationale="it is overdue and unpaid"),
-            PolicyContext(now=now, invoice=disputed),
-        )
-
-    dnd_order = next(
-        (o for o in failed
-         if (c := cust.get(o.customer_id)) and c.dnd_registered
-         and Channel.SMS in c.consented_channels and o.amount >= Money.rupees(500)),
-        None,
-    )
-    if dnd_order:
-        add(
-            "SMS a customer on the DND registry",
-            "DENY",
-            Action(type=ActionType.SEND_DUNNING, subject_id=dnd_order.id,
-                   scheduled_at=_ist(day, 11), channel=Channel.SMS,
-                   rationale="SMS gets read faster than email"),
-            PolicyContext(now=now, order=dnd_order, customer=cust.get(dnd_order.customer_id)),
-        )
-
-    tiny = min(
-        (o for o in failed
-         if o.last_decline and o.last_decline.spec.max_retries == 0),
-        key=lambda o: o.amount, default=None,
-    )
-    if tiny:
-        add(
-            f"Chase a balance of {tiny.amount}",
-            "DENY",
-            Action(type=ActionType.SEND_DUNNING, subject_id=tiny.id,
-                   scheduled_at=_ist(day, 11), channel=Channel.EMAIL,
-                   rationale="every rupee counts"),
-            PolicyContext(now=now, order=tiny, customer=cust.get(tiny.customer_id)),
-        )
-
-    nsf = _pick(failed, DeclineCode.INSUFFICIENT_FUNDS, above=Money.rupees(500))
-    if nsf:
-        add(
-            "Retry, when diagnosis says customers are abandoning at OTP",
-            "DENY",
-            Action(type=ActionType.RETRY_PAYMENT, subject_id=nsf.id,
-                   scheduled_at=nsf.last_attempt.at + timedelta(days=2),
-                   rationale="the decline code is technically retryable"),
-            PolicyContext(now=now, order=nsf, customer=cust.get(nsf.customer_id),
-                          diagnosis=RootCause.AUTHENTICATION_DROPOFF),
-        )
-        add(
-            "A fourth contact on the same order inside 14 days",
-            "DENY",
-            Action(type=ActionType.SEND_DUNNING, subject_id=nsf.id,
-                   scheduled_at=_ist(day, 11), channel=Channel.EMAIL,
-                   rationale="they have not responded yet"),
-            PolicyContext(
-                now=now, order=nsf, customer=cust.get(nsf.customer_id),
-                contacts=[
-                    ContactRecord(id=f"c{n}", customer_id=nsf.customer_id,
-                                  channel=Channel.EMAIL, at=now - timedelta(days=3 * n + 1),
-                                  subject_ref=nsf.id)
-                    for n in range(3)
-                ],
-            ),
-        )
-
-    # -- things that are permitted, but only on the system's terms --------
-    if nsf:
-        add(
-            "Retry an NSF decline 30 seconds later",
-            "RESCHEDULE to +24h",
-            Action(type=ActionType.RETRY_PAYMENT, subject_id=nsf.id,
-                   scheduled_at=nsf.last_attempt.at + timedelta(seconds=30),
-                   rationale="try again immediately"),
-            PolicyContext(now=now, order=nsf, customer=cust.get(nsf.customer_id)),
-        )
-
-    night = next(
-        (o for o in failed
-         if (c := cust.get(o.customer_id)) and not c.dnd_registered
-         and Channel.SMS in c.consented_channels and o.amount >= Money.rupees(500)),
-        None,
-    )
-    if night:
-        add(
-            "SMS at 03:00 IST",
-            "RESCHEDULE to 09:00 IST",
-            Action(type=ActionType.SEND_DUNNING, subject_id=night.id,
-                   scheduled_at=_ist(day, 3), channel=Channel.SMS,
-                   rationale="send the reminder now"),
-            PolicyContext(now=now, order=night, customer=cust.get(night.customer_id)),
-        )
-
-    timeout = _pick(failed, DeclineCode.GATEWAY_TIMEOUT, above=Money.rupees(500))
-    if timeout:
-        add(
-            "Retry into an outage that is still open",
-            "RESCHEDULE past the outage",
-            Action(type=ActionType.RETRY_PAYMENT, subject_id=timeout.id,
-                   scheduled_at=timeout.last_attempt.at + timedelta(minutes=10),
-                   rationale="the instrument is fine, it was a timeout"),
-            PolicyContext(now=now, order=timeout, customer=cust.get(timeout.customer_id),
-                          outage_until=timeout.last_attempt.at + timedelta(hours=2)),
-        )
-        add(
-            "Retry a gateway timeout once the outage has cleared",
-            "ALLOW",
-            Action(type=ActionType.RETRY_PAYMENT, subject_id=timeout.id,
-                   scheduled_at=timeout.last_attempt.at + timedelta(minutes=10),
-                   rationale="transient infrastructure failure, instrument is healthy"),
-            PolicyContext(now=now, order=timeout, customer=cust.get(timeout.customer_id)),
-        )
-
-    big = max(
-        (i for i in scenario.invoices if i.is_chaseable(now)),
-        key=lambda i: i.outstanding, default=None,
-    )
-    if big:
-        add(
-            f"Chase a {big.outstanding} receivable",
-            "REQUIRE_APPROVAL",
-            Action(type=ActionType.SEND_DUNNING, subject_id=big.id,
-                   scheduled_at=_ist(day, 11), channel=Channel.EMAIL,
-                   rationale="materially overdue, no dispute on record"),
-            PolicyContext(now=now, invoice=big),
-        )
-
-    if stolen:
-        add(
-            "Escalate the stolen card to the risk team",
-            "ALLOW",
-            Action(type=ActionType.ESCALATE_TO_RISK, subject_id=stolen.id,
-                   scheduled_at=now, rationale="fraud signal, recovery must not touch this"),
-            PolicyContext(now=now, order=stolen, customer=cust.get(stolen.customer_id)),
-        )
+    probes = bench(scenario)
 
     # -- run them ---------------------------------------------------------
     counts: dict[Disposition, int] = {d: 0 for d in Disposition}
     surprises: list[str] = []
 
-    for label, expect, action, ctx in probes:
-        ruling = engine.evaluate(action, ctx)
+    for probe in probes:
+        action = probe.action
+        ruling = engine.evaluate(action, probe.context)
         counts[ruling.disposition] += 1
         style = DISPOSITION_STYLE[ruling.disposition]
         got = ruling.disposition.value.upper()
-        agrees = expect.split()[0] == got
-        if not agrees:
-            surprises.append(f"{label}: expected {expect}, got {got}")
+        if ruling.disposition is not probe.expect:
+            surprises.append(f"{probe.label}: expected {probe.expected}, got {got}")
 
-        console.print(f"[bold]{label}[/bold]  [dim]({action.subject_id})[/dim]")
+        console.print(f"[bold]{probe.label}[/bold]  [dim]({action.subject_id})[/dim]")
         console.print(f"  proposed   {action.describe()}")
-        console.print(f"  ruling     [{style}]{got}[/{style}]  [dim]expected {expect}[/dim]")
+        console.print(
+            f"  ruling     [{style}]{got}[/{style}]  [dim]expected {probe.expected}[/dim]"
+        )
         if ruling.final and utc(ruling.final.scheduled_at) != utc(action.scheduled_at):
             local = utc(ruling.final.scheduled_at).astimezone(IST)
             console.print(
@@ -1097,9 +903,9 @@ def stage_restart(scenario) -> None:
         engine = PolicyEngine()
         now = scenario.ends_at
 
-        soon = _pick(scenario.failed_orders, DeclineCode.INSUFFICIENT_FUNDS)
-        missed = _pick(scenario.failed_orders, DeclineCode.ISSUER_UNAVAILABLE)
-        retryable = _pick(scenario.failed_orders, DeclineCode.GATEWAY_TIMEOUT)
+        soon = pick(scenario.failed_orders, DeclineCode.INSUFFICIENT_FUNDS)
+        missed = pick(scenario.failed_orders, DeclineCode.ISSUER_UNAVAILABLE)
+        retryable = pick(scenario.failed_orders, DeclineCode.GATEWAY_TIMEOUT)
         # The approval comes off the receivables book rather than a failed
         # payment: an order in this batch is a few thousand rupees and the
         # engine asks for a person at twenty-five, so the subject that really
