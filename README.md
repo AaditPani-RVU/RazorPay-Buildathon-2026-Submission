@@ -718,7 +718,7 @@ side, a clock a person can push, an approval that can be overruled after it is
 given, a live dispatch that comes back as an openable link, and the webhook
 receiver behind a real endpoint. 499 tests, and the repo is lint clean.
 
-**Not built:** the webhook receiver now has a server in front of it, and no
+**Not built:** the webhook receiver now has a server in front of it, but no
 public address -- Razorpay needs a reachable URL, and a laptop wants a tunnel.
 The verification, matching and crediting are the real ones either way; only the
 postman is local. Nothing ticks the scheduler on a timer: the walkthrough steps
