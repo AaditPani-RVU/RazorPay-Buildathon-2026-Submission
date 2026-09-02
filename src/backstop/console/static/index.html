@@ -1,0 +1,331 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Backstop — operator console</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,400;0,500;0,600;1,6..72,400&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="/static/console.css">
+</head>
+<body>
+
+<header class="bar">
+  <div class="brand">
+    <span class="mark">Backstop</span>
+    <span class="sub">operator console</span>
+  </div>
+
+  <div class="clockbox" id="clockbox" hidden>
+    <div class="clocklabel">batch clock</div>
+    <div class="clock" id="clock">—</div>
+  </div>
+
+  <div class="controls">
+    <label class="field">seed <input id="seed" type="number" value="1" min="1" max="999"></label>
+    <label class="field">sample <input id="sample" type="number" value="150" min="10" max="2000" step="10"></label>
+    <button id="build" class="primary">Generate &amp; rule</button>
+  </div>
+</header>
+
+<div id="banner" class="banner" hidden></div>
+
+<main class="page">
+
+  <section class="surfaces" id="surfaces" hidden></section>
+
+  <nav class="tabs" id="tabs" hidden>
+    <button data-tab="rulings" class="on">Rulings</button>
+    <button data-tab="measure">Measure</button>
+    <button data-tab="rules">Rules</button>
+    <button data-tab="approvals">Approvals <span class="badge" id="badge-approvals"></span></button>
+    <button data-tab="schedule">Schedule <span class="badge" id="badge-schedule"></span></button>
+    <button data-tab="bench">Bench</button>
+    <button data-tab="detect">Detect</button>
+    <button data-tab="diagnose">Diagnose</button>
+    <button data-tab="live">Live</button>
+    <button data-tab="log">Log</button>
+  </nav>
+
+  <!-- ---------------------------------------------------------------- -->
+  <section class="panel" id="panel-rulings" hidden>
+    <div class="lede">
+      <h2>One engine, two plans</h2>
+      <p>
+        The same sixteen rules, the same subjects, the same moments. Backstop's
+        plan is the one being <em>operated</em> — what it permits goes to the
+        scheduler and what needs a person goes to the queue. The naive plan is
+        ruled beside it and dispatched nowhere: it is here because a good
+        planner rarely proposes anything the rules must refuse, so a stream
+        drawn only from Backstop's own playbook would show a boundary holding
+        back nothing.
+      </p>
+    </div>
+
+    <div class="splits" id="splits"></div>
+
+    <div class="filters">
+      <select id="f-source"><option value="">both plans</option><option value="backstop">backstop</option><option value="naive">naive</option></select>
+      <select id="f-surface"><option value="">all surfaces</option></select>
+      <select id="f-disposition"><option value="">all dispositions</option></select>
+      <select id="f-rule"><option value="">any rule</option></select>
+      <input id="f-q" type="search" placeholder="subject, verb or rationale">
+      <span class="count" id="rowcount"></span>
+    </div>
+
+    <div class="tablewrap">
+      <table class="rows" id="rowtable">
+        <thead><tr>
+          <th>disposition</th><th>plan</th><th>surface</th><th>action</th>
+          <th>subject</th><th>scheduled</th><th>rules that spoke</th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <div class="more"><button id="more-rows" hidden>Show more</button></div>
+  </section>
+
+  <!-- ---------------------------------------------------------------- -->
+  <section class="panel" id="panel-measure" hidden>
+    <div class="lede">
+      <h2>Four arms, one batch</h2>
+      <p>
+        Every arm faces identical orders and identical latent recoverability,
+        fixed before any of them ran. The policy engine evaluates every action
+        in every arm — the only difference is whether its rulings are obeyed,
+        which is what makes the violation counts comparable rather than
+        self-reported. <em>Of which illegal</em> is revenue taken by actions
+        the rules refuse: a merchant cannot keep it, so crediting it would
+        score the baseline for exactly the behaviour the engine exists to stop.
+      </p>
+      <p>
+        The three surfaces are tabled apart and never added. A recovered
+        payment is one amount that landed; a re-registered mandate is a year of
+        billing restored; a collected invoice is a balance already owed.
+      </p>
+    </div>
+    <div class="deskbar">
+      <button id="run-measure" class="primary">Replay the four arms</button>
+      <label class="field">use the model <input id="measure-model" type="checkbox"></label>
+      <span class="count" id="measurebackend"></span>
+    </div>
+    <div id="measureout"></div>
+  </section>
+
+  <!-- ---------------------------------------------------------------- -->
+  <section class="panel" id="panel-rules" hidden>
+    <div class="lede">
+      <h2>Which rules are load-bearing</h2>
+      <p>
+        Every rule is consulted on every action; none is skipped once another
+        objects. So a rule that never speaks is not idle — it is a guarantee
+        this batch never needed. The bar shows how often each one spoke to
+        each plan.
+      </p>
+    </div>
+    <div id="rulelist" class="rulelist"></div>
+  </section>
+
+  <!-- ---------------------------------------------------------------- -->
+  <section class="panel" id="panel-approvals" hidden>
+    <div class="lede">
+      <h2>What automation is not allowed to decide alone</h2>
+      <p>
+        An approval is permission from a person, not an exemption from the
+        rules. Releasing re-runs all sixteen against the world that holds
+        <em>now</em>, so a yes given on Tuesday can still be refused on
+        Wednesday — and the reviewer is told which rule overtook them. Silence
+        is not consent: an unanswered request expires, and the revenue is
+        reported as given up by a staffing decision rather than quietly booked.
+      </p>
+    </div>
+
+    <div class="deskbar">
+      <label class="field wide">reviewer <input id="reviewer" type="text" value="console:operator"></label>
+      <button id="approve-visible">Approve visible</button>
+      <button id="reject-visible" class="ghost">Reject visible</button>
+      <button id="release" class="primary">Release approved</button>
+      <select id="f-approval-state">
+        <option value="pending">pending</option>
+        <option value="">all</option>
+        <option value="approved">approved</option>
+        <option value="rejected">rejected</option>
+        <option value="expired">expired</option>
+      </select>
+      <span class="count" id="approvalcount"></span>
+    </div>
+
+    <div id="releaseout" class="releaseout" hidden></div>
+    <div id="approvallist" class="cards"></div>
+  </section>
+
+  <!-- ---------------------------------------------------------------- -->
+  <section class="panel" id="panel-schedule" hidden>
+    <div class="lede">
+      <h2>Held until its own moment, and ruled on again there</h2>
+      <p>
+        Three rules exist mainly to move an action rather than refuse it. That
+        only means something if something honours the new time. Nothing fires
+        early — there is no flush and no force — and the rules run again at
+        fire time, because the world an action was judged in is not the world
+        it lands in. A moment that passed while nothing was running is dropped
+        as stale rather than fired a day late.
+      </p>
+    </div>
+
+    <div class="deskbar">
+      <button id="tick-next" class="primary">Advance to next due</button>
+      <button id="tick-1">+1 hour</button>
+      <button id="tick-6">+6 hours</button>
+      <button id="tick-24">+24 hours</button>
+      <select id="f-schedule-state">
+        <option value="waiting">waiting</option>
+        <option value="">all</option>
+        <option value="fired">fired</option>
+        <option value="refused">refused</option>
+        <option value="stale">stale</option>
+        <option value="abandoned">abandoned</option>
+      </select>
+      <span class="count" id="schedulecount"></span>
+    </div>
+
+    <div id="tickout" class="tickout" hidden></div>
+    <div class="tablewrap">
+      <table class="rows" id="scheduletable">
+        <thead><tr><th>state</th><th>due</th><th>surface</th><th>action</th><th>subject</th><th>moves</th><th>note</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ---------------------------------------------------------------- -->
+  <section class="panel" id="panel-bench" hidden>
+    <div class="lede">
+      <h2>The bench</h2>
+      <p>
+        A fixed set of actions the engine must rule on the same way every time,
+        each naming a real order, invoice or customer from this batch. Half of
+        them are things recovery must never be allowed to do. Each carries the
+        ruling it is expected to get, so a rule that quietly stopped denying
+        something shows up here as a mismatch rather than as a line nobody read.
+      </p>
+    </div>
+    <div id="benchsummary" class="benchsummary"></div>
+    <div id="benchlist" class="cards"></div>
+  </section>
+
+  <!-- ---------------------------------------------------------------- -->
+  <section class="panel" id="panel-detect" hidden>
+    <div class="lede">
+      <h2>Finding the money, without a model</h2>
+      <p>
+        Segmented anomaly detection at three resolutions at once, rolled up to
+        the scope each problem actually has. No LLM anywhere in it: this runs
+        over every attempt in the batch and has to answer in seconds, and the
+        money at risk is a number. Scored against the incidents that produced
+        the batch, because a detector reporting six clusters is not evidence of
+        anything until somebody says whether these are the right six.
+      </p>
+    </div>
+    <div id="detectscore" class="scorestrip"></div>
+    <div class="tablewrap">
+      <table class="rows" id="clustertable">
+        <thead><tr><th>cluster</th><th>segment</th><th>window</th><th>at risk</th><th>dominant decline</th><th>share</th><th>ground truth</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ---------------------------------------------------------------- -->
+  <section class="panel" id="panel-diagnose" hidden>
+    <div class="lede">
+      <h2>Why it is failing</h2>
+      <p>
+        The one place on this page where a model decides anything. Detection
+        says money is leaking and where; diagnosis says why, which is what
+        chooses between a retry, a route switch, a re-engagement and doing
+        nothing. Output is a closed enum so the engine downstream can switch on
+        it, and every answer is printed beside the incident that actually
+        caused the cluster.
+      </p>
+    </div>
+    <div class="deskbar">
+      <button id="run-diagnose" class="primary">Diagnose with the model</button>
+      <span class="count" id="diagnosebackend"></span>
+    </div>
+    <div id="diagnoselist" class="cards"></div>
+  </section>
+
+  <!-- ---------------------------------------------------------------- -->
+  <section class="panel" id="panel-live" hidden>
+    <div class="lede">
+      <h2>The one component that reaches outside</h2>
+      <p>
+        Everything else on this page is a claim about what recovery
+        <em>would</em> do. This dispatches, against Razorpay's test API, and it
+        satisfies the same executor protocol the simulator does — so the ledger
+        and the rules did not change to accommodate it. Nothing reaches it that
+        the engine did not permit, the action is ruled on again at the moment
+        you press the button, and what it sends is the action as the rules left
+        it. Live keys are refused outright and there is no override; test mode
+        really delivers, so notifications are off unless you ask.
+      </p>
+    </div>
+
+    <div class="deskbar">
+      <button id="go-live" class="primary">Bind the test-mode adapter</button>
+      <label class="field">notify <input id="notify" type="checkbox"></label>
+      <span class="count" id="livestatus"></span>
+    </div>
+
+    <div id="livecaps" class="benchsummary" hidden></div>
+    <div id="livecandidates" class="cards"></div>
+    <div id="liveresults" class="releaseout" hidden></div>
+
+    <div class="lede" style="margin-top:2rem">
+      <h2>And the one it lets in</h2>
+      <p>
+        A dispatch is not a recovery — a payment link is paid when a person
+        opens it, hours later and out of band. The receiver takes the push
+        rather than polling for it: raw bytes in, verdict out, signature
+        checked against those bytes before anything parses them. It credits
+        only what recovery itself dispatched, because a merchant's own payment
+        links are paid all day and none of that is recovered revenue.
+      </p>
+    </div>
+    <div id="webhookinfo" class="releaseout"></div>
+  </section>
+
+  <!-- ---------------------------------------------------------------- -->
+  <section class="panel" id="panel-log" hidden>
+    <div class="lede">
+      <h2>What happened, in order</h2>
+      <p>
+        Every approval, expiry, firing, deferral and refusal, newest first.
+        A refusal names the rule that produced it — which is what makes “zero
+        policy violations” a claim about a record rather than an assertion.
+      </p>
+    </div>
+    <div class="tablewrap">
+      <table class="rows" id="logtable">
+        <thead><tr><th>at</th><th>kind</th><th>rule</th><th>what</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+
+</main>
+
+<div id="empty" class="empty">
+  <h1>The model proposes,<br>the policy engine <em>disposes</em>.</h1>
+  <p>
+    Generate a batch to begin. Roughly eight seconds: 148,000 orders, three
+    detection scans, two plans and every action in both of them ruled on by all
+    sixteen rules.
+  </p>
+</div>
+
+<script src="/static/console.js"></script>
+</body>
+</html>
