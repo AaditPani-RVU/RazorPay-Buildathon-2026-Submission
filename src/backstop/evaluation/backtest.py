@@ -58,12 +58,13 @@ from backstop.diagnose.diagnoser import Diagnoser
 from backstop.diagnose.evidence import EvidenceBuilder
 from backstop.domain.actions import Action
 from backstop.domain.declines import RootCause
-from backstop.domain.entities import ContactRecord, new_id, utc
+from backstop.domain.entities import utc
 from backstop.domain.money import Money
 from backstop.execute.executor import SimulatedExecutor
 from backstop.ledger.ledger import LedgerEntry, RecoveryLedger, Surface, Violation
 from backstop.llm import GroqProvider, LLMClient, ScriptedProvider
-from backstop.policy.engine import Disposition, PolicyContext, PolicyEngine
+from backstop.policy.engine import Disposition, PolicyEngine
+from backstop.policy.subjects import ContactBook, SubjectIndex
 from backstop.simulate.generator import SimConfig, generate
 from backstop.simulate.scenario import Scenario
 
@@ -124,15 +125,13 @@ def run_arm(
     same moments.
     """
     engine = PolicyEngine()
-    orders = {o.id: o for o in scenario.orders}
-    subs = {s.id: s for s in scenario.subscriptions}
-    invoices = {i.id: i for i in scenario.invoices}
+    index = SubjectIndex.of(scenario)
     executor = SimulatedExecutor(
-        orders=orders,
+        orders=index.orders,
         recoverability=scenario.recoverability,
-        subscriptions=subs,
+        subscriptions=index.subscriptions,
         mandate_recovery=scenario.mandate_recovery,
-        invoices=invoices,
+        invoices=index.invoices,
         invoice_recovery=scenario.invoice_recovery,
     )
     ledger = RecoveryLedger(arm=name)
@@ -140,43 +139,19 @@ def run_arm(
 
     # Contact history accumulates as the arm runs, so frequency caps and
     # fatigue see what this arm has actually already sent.
-    sent: dict[str, list[ContactRecord]] = {}
-    # The same contacts indexed by person rather than by subject. Kept
-    # alongside rather than derived, because the per-person cap has to be
-    # answerable at the moment an action is judged, not reconstructed after.
-    sent_to: dict[str, list[ContactRecord]] = {}
+    book = ContactBook()
 
     for action in sorted(actions, key=lambda a: utc(a.scheduled_at)):
         # An action's subject names its surface. On payments that is the
         # failed order; on recurring it is the subscription itself, because
         # re-registering a lapsed mandate acts on the authorisation rather
         # than on any one presentation of it; on receivables it is the invoice.
-        subject_sub = subs.get(action.subject_id)
-        subject_inv = invoices.get(action.subject_id)
-        order = orders.get(action.subject_id)
-        invoice = None
-        if subject_sub is not None:
-            surface = Surface.RECURRING
-            customer = scenario.customers.get(subject_sub.customer_id)
-            subscription = subject_sub
-        elif subject_inv is not None:
-            surface = Surface.RECEIVABLE
-            customer = scenario.customers.get(subject_inv.buyer_id)
-            subscription = None
-            invoice = subject_inv
-        else:
-            surface = Surface.PAYMENT
-            customer = scenario.customers.get(order.customer_id) if order else None
-            sub_id = scenario.subscription_by_order.get(action.subject_id)
-            subscription = subs.get(sub_id) if sub_id else None
-        ctx = PolicyContext(
-            now=utc(action.scheduled_at),
-            customer=customer,
-            order=order,
-            invoice=invoice,
-            subscription=subscription,
-            contacts=sent.get(action.subject_id, []),
-            customer_contacts=sent_to.get(customer.id, []) if customer else [],
+        subject = index.resolve(action.subject_id)
+        surface = subject.surface
+        customer = subject.customer
+        ctx = index.context(
+            action,
+            contacts=book,
             diagnosis=diagnosis_by_order.get(action.subject_id),
             outage_until=outage_by_order.get(action.subject_id),
         )
@@ -201,17 +176,7 @@ def run_arm(
                     violations.append(Violation(final, v.rule_id, v.reason, surface))
                     break
 
-        if final.is_contact and final.channel:
-            record = ContactRecord(
-                id=new_id("contact"),
-                customer_id=customer.id if customer else "",
-                channel=final.channel,
-                at=at,
-                subject_ref=final.subject_id,
-            )
-            sent.setdefault(final.subject_id, []).append(record)
-            if customer:
-                sent_to.setdefault(customer.id, []).append(record)
+        book.record(final, customer_id=customer.id if customer else "", at=at)
 
     return ArmResult(name=name, ledger=ledger, violations=violations)
 
