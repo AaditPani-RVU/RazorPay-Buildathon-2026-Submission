@@ -9,3 +9,6 @@ dist/
 build/
 runs/
 .coverage
+
+# submission form draft: personal details, never commit
+form-answers.md
