@@ -3,6 +3,8 @@ name = "backstop"
 version = "0.1.0"
 description = "Bounded revenue-recovery agent: detect revenue at risk, diagnose root cause, execute policy-constrained recovery, and measure money recovered."
 requires-python = ">=3.12"
+license = "MIT"
+license-files = ["LICENSE"]
 dependencies = [
     "groq>=0.13.0",
     "pydantic>=2.9",

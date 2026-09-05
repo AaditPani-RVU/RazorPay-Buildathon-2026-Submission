@@ -641,7 +641,13 @@ measurement reports from.
 .venv/bin/python -m backstop.console            # http://127.0.0.1:8000
 .venv/bin/python -m backstop.console --seed 4 --sample 300
 .venv/bin/python -m backstop.console --cold     # start empty, generate from the page
+.venv/bin/python -m backstop.console --host 0.0.0.0   # reachable from the rest of the LAN
 ```
+
+`--host 0.0.0.0` is what a second machine on the same network needs -- the default binds
+loopback and nothing else can see it. The session is single-writer either way, so this
+is one console shared rather than one each: a second browser advancing the clock moves
+it for both.
 
 Four things it does that the walkthrough cannot.
 
@@ -666,11 +672,14 @@ somebody is at the desk. That is the backtest's staffing assumption made
 falsifiable rather than convenient.
 
 **It shows an approval being overruled.** Approve every pending request, let
-eighteen hours pass, then release: 158 are permitted and three are refused by
-`promise_to_pay`, because the buyer committed to a payment date in the interval
-between the ask and the answer. The reviewer is told which rule overtook them.
-This is the one property of the approval queue that a screenshot cannot assert
-and a transcript cannot stage.
+eighteen hours pass, then release: 157 of the 161 are permitted and four are
+refused by `promise_to_pay`, because the buyer committed to a payment date in
+the interval between the ask and the answer. That split moves by one or two
+from week to week, and deliberately: promises are dated relative to now, so a
+batch generated today carries different live ones than a batch generated a
+fortnight ago. The reviewer is told which rule overtook them. This is the one
+property of the approval queue that a screenshot cannot assert and a transcript
+cannot stage.
 
 **It dispatches, and it receives.** The live tab binds the Razorpay test-mode
 adapter, probes what the key can reach, and sends one permitted action per
