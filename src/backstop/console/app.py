@@ -34,7 +34,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request, Response
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -197,8 +197,19 @@ app.mount("/static", StaticFiles(directory=str(STATIC)), name="static")
 
 
 @app.get("/")
-def index() -> FileResponse:
-    return FileResponse(STATIC / "index.html")
+def index() -> HTMLResponse:
+    """The page shell, with its assets stamped by their modification time.
+
+    A browser holding yesterday's stylesheet is a nuisance in development and a
+    disaster on camera, and neither `ETag` nor a reload the presenter forgets to
+    make hard is a guarantee. Stamping the query string means the URL itself
+    changes whenever the file does, so there is nothing to invalidate.
+    """
+    html = (STATIC / "index.html").read_text()
+    for asset in ("console.css", "console.js"):
+        stamp = int((STATIC / asset).stat().st_mtime)
+        html = html.replace(f"/static/{asset}", f"/static/{asset}?v={stamp}")
+    return HTMLResponse(html, headers={"cache-control": "no-store"})
 
 
 @app.get("/api/bootstrap")
