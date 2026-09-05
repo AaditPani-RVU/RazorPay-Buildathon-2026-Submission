@@ -6,7 +6,7 @@
 <title>Backstop — operator console</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,400;0,500;0,600;1,6..72,400&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Spectral:ital,wght@0,400;0,500;0,600;1,400&family=Public+Sans:wght@400;450;500;600&family=Spline+Sans+Mono:wght@400;500;600&display=swap">
 <link rel="stylesheet" href="/static/console.css">
 </head>
 <body>
@@ -50,20 +50,22 @@
 
   <!-- ---------------------------------------------------------------- -->
   <section class="panel" id="panel-rulings" hidden>
-    <div class="lede">
-      <h2>One engine, two plans</h2>
-      <p>
-        The same sixteen rules, the same subjects, the same moments. Backstop's
-        plan is the one being <em>operated</em> — what it permits goes to the
-        scheduler and what needs a person goes to the queue. The naive plan is
-        ruled beside it and dispatched nowhere: it is here because a good
-        planner rarely proposes anything the rules must refuse, so a stream
-        drawn only from Backstop's own playbook would show a boundary holding
-        back nothing.
-      </p>
-    </div>
+    <div class="hero">
+      <div class="lede">
+        <h2>One engine, two plans</h2>
+        <p>
+          The same sixteen rules, the same subjects, the same moments. Backstop's
+          plan is the one being <em>operated</em> — what it permits goes to the
+          scheduler and what needs a person goes to the queue. The naive plan is
+          ruled beside it and dispatched nowhere: it is here because a good
+          planner rarely proposes anything the rules must refuse, so a stream
+          drawn only from Backstop's own playbook would show a boundary holding
+          back nothing.
+        </p>
+      </div>
 
-    <div class="splits" id="splits"></div>
+      <div class="splits" id="splits"></div>
+    </div>
 
     <div class="filters">
       <select id="f-source"><option value="">both plans</option><option value="backstop">backstop</option><option value="naive">naive</option></select>

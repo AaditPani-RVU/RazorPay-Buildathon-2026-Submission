@@ -122,40 +122,61 @@ function renderSurfaces(s) {
         <div class="name">${esc(card.label)}</div>
         <div class="sub2">${esc(card.subtitle)}</div>
         <div class="value">${esc(card.at_risk)}</div>
-        <div class="unit">at risk · ${card.subjects.toLocaleString()} subjects</div>
+        <div class="unit">${esc(card.denominated)}, across ${card.subjects.toLocaleString()} subjects</div>
         <div class="detail">${esc(card.detail)}</div>
-        <div class="detail dim mono">recovered so far ${esc(led.recovered)} ·
-          ${led.contacts} contacts · ${led.vetoed} refused</div>
+        <div class="detail dim">recovered so far ${esc(led.recovered)} from
+          ${led.contacts.toLocaleString()} contacts, with ${led.vetoed} refused</div>
       </div>`;
     })
     .join('');
 }
 
+/* Both plans are drawn against the larger of the two totals rather than each
+   against its own, because the sizes are the argument: the naive plan proposes
+   more than twice as many actions and the rules refuse 733 of them. Two bars
+   normalised to their own widths are the same rectangle twice, which is a
+   picture that agrees with whatever the viewer already believed. */
 function renderSplits(s) {
   const dispositions = ['allow', 'reschedule', 'require_approval', 'deny'];
   const plans = [
     ['backstop', 'the plan being operated'],
     ['naive', 'ruled beside it, dispatched nowhere'],
   ];
-  $('#splits').innerHTML = plans
-    .map(([plan, note]) => {
+  const totals = plans.map(([plan]) =>
+    dispositions.reduce((sum, d) => sum + (s.counts[`${plan}:${d}`] || 0), 0));
+  const axis = Math.max(...totals, 1);
+
+  const body = plans
+    .map(([plan, note], p) => {
       const counts = dispositions.map((d) => s.counts[`${plan}:${d}`] || 0);
-      const total = counts.reduce((a, b) => a + b, 0) || 1;
+      const total = totals[p];
       const bars = dispositions
-        .map((d, i) => `<span class="${d}" style="width:${(counts[i] / total) * 100}%"></span>`)
+        .map((d, i) => `<span class="${d}" style="width:${(counts[i] / axis) * 100}%"></span>`)
         .join('');
       const legend = dispositions
         .map((d, i) => `<span class="${d}"><span class="k">${d.replace(/_/g, ' ')}</span>
           <b>${counts[i].toLocaleString()}</b></span>`)
         .join('');
       return `<div class="split">
-        <h3>${plan}</h3>
-        <div class="total">${total.toLocaleString()} actions <span class="dim">— ${note}</span></div>
-        <div class="bar-stack">${bars}</div>
-        <div class="legend">${legend}</div>
+        <h3>${plan}<span class="note">${note}</span></h3>
+        <div>
+          <div class="total">${total.toLocaleString()} actions</div>
+          <div class="bar-stack">${bars}</div>
+          <div class="legend">${legend}</div>
+        </div>
       </div>`;
     })
     .join('');
+
+  const denials = plans.map(([plan]) => s.counts[`${plan}:deny`] || 0);
+  const note = denials[1]
+    ? `Both bars share one axis. The naive plan is longer because it proposes
+       more, and red at the end because the rules refuse
+       <b>${denials[1].toLocaleString()}</b> of what it proposes, against
+       <b>${denials[0].toLocaleString()}</b> on the plan actually being
+       operated. That gap is the boundary doing its work.`
+    : '';
+  $('#splits').innerHTML = body + (note ? `<p class="splitnote">${note}</p>` : '');
 }
 
 function fillFilters() {
@@ -223,7 +244,8 @@ function rowHtml(r) {
   const when = r.moved
     ? `<span class="dim">${fmtDay(r.scheduled_at)}</span> → ${fmtDay(r.final_at)}`
     : fmtDay(r.scheduled_at);
-  return `<tr>
+  const quiet = r.disposition === 'allow' ? ' class="q"' : '';
+  return `<tr${quiet}>
     <td class="nowrap">${chip(r.disposition)}</td>
     <td class="mono dim">${r.source}</td>
     <td class="mono dim">${r.surface}</td>
@@ -252,7 +274,7 @@ async function loadMeasurement() {
     .map(([key, [title, subtitle, subject]]) => {
       const rows = data.surfaces[key] || [];
       return `<h3 class="surfacehead">${title}
-          <span class="dim">${subtitle} · ${esc(data.at_risk[key] || '')} at risk</span></h3>
+          <span class="dim">${subtitle}, ${esc(data.at_risk[key] || '')} at risk</span></h3>
         <div class="tablewrap"><table class="rows"><thead><tr>
           <th>arm</th><th>recovered</th><th>of which illegal</th><th>keepable net</th>
           <th>${subject}</th><th>charges</th><th>contacts</th><th>burst</th><th>violations</th>
@@ -325,7 +347,7 @@ async function loadApprovals() {
   const data = await api(`/api/approvals?state=${encodeURIComponent(chosen)}`);
   $('#approvalcount').textContent = Object.entries(data.counts)
     .map(([k, v]) => `${k} ${v}`)
-    .join('  ·  ');
+    .join(', ');
   $('#approvallist').innerHTML = data.requests
     .map(
       (r) => `<div class="card" data-id="${r.id}">
@@ -394,7 +416,7 @@ async function loadSchedule() {
   const data = await api(`/api/schedule?state=${encodeURIComponent(chosen)}`);
   $('#schedulecount').textContent = Object.entries(data.counts)
     .map(([k, v]) => `${k} ${v}`)
-    .join('  ·  ');
+    .join(', ');
   $('#scheduletable tbody').innerHTML = data.entries
     .map(
       (e) => `<tr>
@@ -449,7 +471,7 @@ async function loadBench() {
       </div>
       <div class="what">${esc(p.proposed)}</div>
       <div class="why">expected <b>${esc(p.expected)}</b>${
-        p.moved_to ? ` · moved to ${esc(p.moved_to)}` : ''
+        p.moved_to ? `, moved to ${esc(p.moved_to)}` : ''
       }</div>
       <div>${
         p.verdicts.length
@@ -528,7 +550,7 @@ async function loadDiagnoses() {
              <div class="why">${esc(d.error)}</div>`
       }
       <div class="why dim">${esc(d.at_risk)} at risk${
-        d.repaired ? ' · schema repair was needed' : ''
+        d.repaired ? ', schema repair was needed' : ''
       }</div>
     </div>`
     )
@@ -589,7 +611,7 @@ async function renderCandidates() {
       (e) => `<div class="card">
       <div class="head">${chip('waiting')}<span class="title">${e.surface}</span></div>
       <div class="what">${esc(e.action)}</div>
-      <div class="why">due ${fmtDay(e.due_at)} · ruled on again at the moment you press this</div>
+      <div class="why">due ${fmtDay(e.due_at)}, ruled on again at the moment you press this</div>
       <div class="foot"><button data-dispatch="${e.id}">Dispatch for real</button></div>
     </div>`
     )

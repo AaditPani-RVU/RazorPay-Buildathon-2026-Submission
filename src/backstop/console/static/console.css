@@ -1,17 +1,26 @@
-/* The console's palette is the submission page's, deliberately: a judge who
-   read the page and then opened this should recognise it as the same object.
-   Dispositions get the load-bearing colours -- allow, deny, reschedule and
-   approval -- and nothing else in the interface is allowed to use them. */
+/* A docket, not a dashboard.
+
+   Every row on this page is a subject, a verdict, and the rule that spoke, and
+   the interface is built to say exactly that. Two constraints hold it together.
+
+   Four colours mean four verdicts -- allow, deny, reschedule, approval -- and
+   nothing else in the interface is allowed to use colour. They are the same
+   four the submission page uses, so a reader who arrives from there recognises
+   a denial on sight.
+
+   Scale is honest. Any two quantities a person might compare are drawn against
+   one axis, because a bar normalised to its own total is a picture that agrees
+   with whatever you already believed. */
 
 :root {
-  --paper:      #F4F6F8;
-  --surface:    #FFFFFF;
-  --surface-2:  #EAEDF1;
-  --ink:        #15181E;
-  --ink-2:      #3C434F;
-  --muted:      #6A7381;
-  --line:       #D5DAE1;
-  --line-soft:  #E3E7EC;
+  --ground:    #EAEAE7;
+  --surface:   #F7F7F5;
+  --raised:    #DEDEDA;
+  --ink:       #17181A;
+  --ink-2:     #45464A;
+  --muted:     #737579;
+  --line:      #C9C9C4;
+  --line-soft: #DCDCD7;
 
   --allow:      #1C6E47;
   --deny:       #A82C38;
@@ -23,21 +32,23 @@
   --resched-bg: #F6ECD9;
   --approval-bg:#EFE6F5;
 
-  --mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
-  --sans: "IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
-  --serif: Newsreader, ui-serif, Georgia, serif;
+  --mono:  "Spline Sans Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  --sans:  "Public Sans", ui-sans-serif, system-ui, sans-serif;
+  --serif: Spectral, ui-serif, Georgia, serif;
+
+  --gutter: clamp(1rem, 3.5vw, 2.4rem);
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --paper:     #101319;
-    --surface:   #171B22;
-    --surface-2: #1F242D;
-    --ink:       #E8EBEF;
-    --ink-2:     #B7BEC9;
-    --muted:     #838D9B;
-    --line:      #2C333D;
-    --line-soft: #232932;
+    --ground:    #131417;
+    --surface:   #1A1C20;
+    --raised:    #22252A;
+    --ink:       #EDEDEA;
+    --ink-2:     #B3B4B0;
+    --muted:     #7C7E7B;
+    --line:      #2A2D33;
+    --line-soft: #212429;
 
     --allow:     #5FBE8C;
     --deny:      #E4707C;
@@ -55,153 +66,225 @@
 
 body {
   margin: 0;
-  background: var(--paper);
+  background: var(--ground);
   color: var(--ink);
   font-family: var(--sans);
-  font-size: 14px;
-  line-height: 1.55;
+  font-size: 14.5px;
+  line-height: 1.5;
   -webkit-font-smoothing: antialiased;
 }
 
-h1, h2, h3 { font-family: var(--serif); font-weight: 500; margin: 0; letter-spacing: -.015em; }
+h1, h2, h3 {
+  font-family: var(--serif);
+  font-weight: 400;
+  margin: 0;
+  letter-spacing: -.011em;
+}
 p { margin: 0; }
 button, input, select { font: inherit; color: inherit; }
+
+:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
 
 /* ---------- top bar ---------- */
 
 .bar {
   position: sticky; top: 0; z-index: 20;
-  display: flex; align-items: center; gap: 1.5rem;
-  padding: .8rem clamp(1rem, 3vw, 2.2rem);
+  display: flex; align-items: center; gap: 1.6rem;
+  padding: .7rem var(--gutter);
   background: var(--surface);
   border-bottom: 1px solid var(--line);
 }
-.brand { display: flex; align-items: baseline; gap: .6rem; }
-.mark { font-family: var(--serif); font-size: 1.35rem; font-weight: 600; letter-spacing: -.02em; }
-.sub {
-  font-family: var(--mono); font-size: .68rem; letter-spacing: .14em;
-  text-transform: uppercase; color: var(--muted);
+.brand { display: flex; align-items: baseline; gap: .55rem; }
+.mark {
+  font-family: var(--serif); font-size: 1.42rem; font-weight: 500;
+  letter-spacing: -.025em;
 }
-.clockbox { margin-left: auto; text-align: right; }
-.clocklabel {
-  font-family: var(--mono); font-size: .62rem; letter-spacing: .14em;
-  text-transform: uppercase; color: var(--muted);
+.sub { font-size: .84rem; color: var(--muted); }
+
+.clockbox { margin-left: auto; display: flex; align-items: baseline; gap: .5rem; }
+.clocklabel { font-size: .8rem; color: var(--muted); }
+.clock {
+  font-family: var(--mono); font-size: .95rem;
+  font-variant-numeric: tabular-nums; letter-spacing: -.02em;
 }
-.clock { font-family: var(--mono); font-size: .95rem; font-weight: 500; font-variant-numeric: tabular-nums; }
 .controls { display: flex; align-items: center; gap: .7rem; }
 .controls:only-child, .clockbox[hidden] + .controls { margin-left: auto; }
 
 .field {
   display: inline-flex; align-items: center; gap: .4rem;
-  font-family: var(--mono); font-size: .7rem; letter-spacing: .08em;
-  text-transform: uppercase; color: var(--muted);
+  font-size: .84rem; color: var(--muted);
 }
 .field input {
-  width: 5.4rem; padding: .3rem .45rem;
-  background: var(--paper); border: 1px solid var(--line); border-radius: 3px;
-  font-family: var(--mono); font-size: .8rem; text-transform: none; letter-spacing: 0;
-  color: var(--ink);
+  width: 4.6rem; padding: .28rem .45rem;
+  background: var(--ground); border: 1px solid var(--line); border-radius: 2px;
+  font-family: var(--mono); font-size: .84rem; color: var(--ink);
 }
 .field.wide input { width: 12rem; }
 
 button {
-  padding: .38rem .8rem; border: 1px solid var(--line); border-radius: 3px;
-  background: var(--surface-2); cursor: pointer;
-  font-size: .82rem; font-weight: 500;
+  padding: .34rem .78rem; border: 1px solid var(--line); border-radius: 2px;
+  background: var(--raised); cursor: pointer;
+  font-size: .86rem; font-weight: 450;
 }
 button:hover { border-color: var(--muted); }
 button:disabled { opacity: .45; cursor: default; }
-button.primary { background: var(--ink); color: var(--paper); border-color: var(--ink); }
-button.primary:hover { opacity: .88; }
+button.primary { background: var(--ink); color: var(--ground); border-color: var(--ink); }
+button.primary:hover { opacity: .86; }
 button.ghost { background: transparent; }
 
 select {
-  padding: .34rem .5rem; border: 1px solid var(--line); border-radius: 3px;
-  background: var(--surface); font-size: .82rem;
+  padding: .3rem .5rem; border: 1px solid var(--line); border-radius: 2px;
+  background: var(--surface); font-size: .86rem;
 }
 input[type=search], input[type=text] {
-  padding: .34rem .55rem; border: 1px solid var(--line); border-radius: 3px;
-  background: var(--surface); font-size: .82rem; min-width: 15rem;
+  padding: .3rem .55rem; border: 1px solid var(--line); border-radius: 2px;
+  background: var(--surface); font-size: .86rem; min-width: 15rem;
 }
+input::placeholder { color: var(--muted); }
 
 /* ---------- banner ---------- */
 
 .banner {
-  padding: .55rem clamp(1rem, 3vw, 2.2rem);
-  font-family: var(--mono); font-size: .78rem;
-  background: var(--surface-2); border-bottom: 1px solid var(--line);
+  padding: .5rem var(--gutter);
+  font-size: .86rem; color: var(--ink-2);
+  background: var(--raised); border-bottom: 1px solid var(--line);
 }
 .banner.err { background: var(--deny-bg); color: var(--deny); }
 
 /* ---------- page ---------- */
 
-.page { max-width: 1500px; margin: 0 auto; padding: 1.4rem clamp(1rem, 3vw, 2.2rem) 5rem; }
+.page { max-width: 1480px; margin: 0 auto; padding: 0 var(--gutter) 5rem; }
 
-.empty { max-width: 40rem; margin: 6rem auto; padding: 0 1.5rem; }
-.empty h1 { font-size: clamp(2rem, 5vw, 3rem); line-height: 1.06; }
-.empty h1 em { font-style: italic; font-weight: 400; color: var(--deny); }
-.empty p { margin-top: 1.4rem; color: var(--ink-2); max-width: 34rem; }
+.empty { max-width: 42rem; margin: 7rem auto; padding: 0 1.5rem; }
+.empty h1 { font-size: clamp(2.2rem, 5.5vw, 3.4rem); line-height: 1.04; letter-spacing: -.03em; }
+.empty h1 em { font-style: italic; color: var(--deny); }
+.empty p { margin-top: 1.5rem; color: var(--ink-2); max-width: 33rem; font-size: 1.02rem; }
 
-/* ---------- surface cards ---------- */
+/* ---------- the three surfaces ----------
+
+   One band, three cells, and deliberately no total. Each cell states its own
+   unit underneath the figure, because the units differ: money that did not
+   land, a year of billing restored, a balance already owed. A layout that
+   offered a place to add them up would be inviting a number nobody could
+   reconcile. */
 
 .surfaces {
-  display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
-  gap: 1px; background: var(--line-soft);
-  border: 1px solid var(--line-soft); margin-bottom: 1.6rem;
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(270px, 1fr));
+  border-bottom: 1px solid var(--line);
 }
-.surfacecard { background: var(--surface); padding: .95rem 1.1rem 1.1rem; }
-.surfacecard .name { font-family: var(--serif); font-size: 1.12rem; }
-.surfacecard .sub2 { font-size: .78rem; color: var(--muted); }
+.surfacecard { padding: 1.25rem 1.6rem 1.3rem 0; }
+.surfacecard + .surfacecard {
+  padding-left: 1.6rem;
+  border-left: 1px solid var(--line-soft);
+}
+.surfacecard .name { font-family: var(--serif); font-size: 1.18rem; }
+.surfacecard .sub2 { font-size: .84rem; color: var(--muted); margin-top: .05rem; }
 .surfacecard .value {
-  font-family: var(--mono); font-size: 1.28rem; font-weight: 500;
-  margin-top: .5rem; letter-spacing: -.02em;
+  font-family: var(--mono); font-size: clamp(1.3rem, 2.2vw, 1.62rem); font-weight: 500;
+  margin-top: .55rem; letter-spacing: -.035em; font-variant-numeric: tabular-nums;
+  line-height: 1.15;
 }
-.surfacecard .unit { font-size: .72rem; color: var(--muted); font-family: var(--mono); }
-.surfacecard .detail { font-size: .76rem; color: var(--ink-2); margin-top: .35rem; }
+.surfacecard .unit { font-size: .8rem; color: var(--muted); margin-top: .15rem; }
+.surfacecard .detail { font-size: .8rem; color: var(--ink-2); margin-top: .5rem; }
+.surfacecard .detail.dim { color: var(--muted); margin-top: .1rem; }
 
 /* ---------- tabs ---------- */
 
 .tabs {
-  display: flex; flex-wrap: wrap; gap: .35rem;
-  border-bottom: 1px solid var(--line); margin-bottom: 1.5rem;
+  display: flex; flex-wrap: wrap; gap: 0 .2rem;
+  border-bottom: 1px solid var(--line); margin-bottom: 1.8rem;
 }
 .tabs button {
   background: transparent; border: none; border-bottom: 2px solid transparent;
-  border-radius: 0; padding: .5rem .7rem; color: var(--muted);
+  border-radius: 0; padding: .62rem .72rem; color: var(--muted);
+  font-size: .92rem;
 }
 .tabs button:hover { color: var(--ink); }
-.tabs button.on { color: var(--ink); border-bottom-color: var(--ink); }
+.tabs button.on { color: var(--ink); border-bottom-color: var(--ink); font-weight: 500; }
 .badge {
-  display: inline-block; min-width: 1.2rem; padding: 0 .28rem; margin-left: .3rem;
-  border-radius: 8px; background: var(--surface-2);
-  font-family: var(--mono); font-size: .66rem; text-align: center; color: var(--ink-2);
+  display: inline-block; min-width: 1.1rem; padding: 0 .3rem; margin-left: .34rem;
+  border-radius: 2px; background: var(--raised);
+  font-family: var(--mono); font-size: .72rem; text-align: center; color: var(--ink-2);
 }
 
 /* ---------- panels ---------- */
 
-.lede { max-width: 66ch; margin-bottom: 1.4rem; }
-.lede h2 { font-size: 1.5rem; }
-.lede p { margin-top: .5rem; color: var(--ink-2); }
+.lede { max-width: 62ch; margin-bottom: 1.9rem; }
+.lede h2 {
+  font-size: clamp(1.6rem, 3vw, 2.05rem); line-height: 1.12; letter-spacing: -.025em;
+}
+.lede p { margin-top: .7rem; color: var(--ink-2); font-size: .96rem; line-height: 1.62; }
 .lede em { font-style: italic; }
 
-/* ---------- the two-plan split ---------- */
+/* The lede argues; the bars show. Side by side at width, stacked when there
+   isn't room, so neither ever reads as a caption for the other. */
+.hero {
+  display: grid;
+  grid-template-columns: minmax(20rem, 27rem) minmax(0, 1fr);
+  gap: 0 3.2rem;
+  align-items: start;
+}
+.hero .lede { margin-bottom: 1.6rem; }
 
-.splits { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 1.2rem; margin-bottom: 1.6rem; }
-.split { border: 1px solid var(--line); background: var(--surface); padding: .9rem 1rem 1rem; }
-.split h3 { font-family: var(--mono); font-size: .72rem; letter-spacing: .12em; text-transform: uppercase; color: var(--muted); }
-.split .total { font-family: var(--mono); font-size: 1.1rem; margin-top: .15rem; }
-.bar-stack { display: flex; height: 12px; margin: .7rem 0 .55rem; background: var(--surface-2); overflow: hidden; border-radius: 2px; }
+@media (max-width: 1060px) {
+  .hero { grid-template-columns: 1fr; gap: 0; }
+}
+
+/* ---------- the two-plan comparison ----------
+
+   The hero, and the one place scale does real work: both bars are drawn
+   against the larger of the two totals, so a plan proposing 1,500 actions is
+   twice the bar of one proposing 694. Normalising each to its own width --
+   which this used to do -- draws two identical rectangles and throws away the
+   entire argument. */
+
+.splits {
+  margin-bottom: 2.2rem;
+  border-top: 1px solid var(--line);
+}
+.split {
+  display: grid;
+  grid-template-columns: minmax(9rem, 11rem) 1fr;
+  gap: 0 1.6rem;
+  align-items: start;
+  padding: 1.05rem 0 1.15rem;
+  border-bottom: 1px solid var(--line-soft);
+}
+.split h3 {
+  font-family: var(--sans); font-size: .98rem; font-weight: 600;
+  letter-spacing: 0; padding-top: .05rem;
+}
+.split h3 .note {
+  display: block; font-weight: 400; font-size: .82rem; color: var(--muted);
+  margin-top: .1rem;
+}
+.split .total {
+  font-family: var(--mono); font-size: 1.05rem; font-variant-numeric: tabular-nums;
+  letter-spacing: -.03em; margin-bottom: .5rem;
+}
+.bar-stack {
+  display: flex; height: 26px; overflow: hidden;
+  background: linear-gradient(var(--line-soft), var(--line-soft)) left / var(--axis, 100%) 100% no-repeat;
+}
 .bar-stack span { display: block; height: 100%; }
 .bar-stack .allow { background: var(--allow); }
 .bar-stack .reschedule { background: var(--resched); }
 .bar-stack .require_approval { background: var(--approval); }
 .bar-stack .deny { background: var(--deny); }
-.legend { display: flex; flex-wrap: wrap; gap: .1rem 1rem; font-family: var(--mono); font-size: .72rem; }
+.legend {
+  display: flex; flex-wrap: wrap; gap: .1rem 1.4rem;
+  font-size: .84rem; margin-top: .5rem;
+}
 .legend span.k { color: var(--muted); }
+.legend b { font-family: var(--mono); font-variant-numeric: tabular-nums; font-weight: 500; }
 .legend .allow b { color: var(--allow); }
 .legend .reschedule b { color: var(--resched); }
 .legend .require_approval b { color: var(--approval); }
 .legend .deny b { color: var(--deny); }
+.splitnote {
+  padding: .85rem 0 0; font-size: .88rem; color: var(--muted); max-width: 62ch;
+}
+.splitnote b { color: var(--ink); font-weight: 500; }
 
 /* ---------- filters ---------- */
 
@@ -209,115 +292,159 @@ input[type=search], input[type=text] {
   display: flex; flex-wrap: wrap; align-items: center; gap: .5rem;
   margin-bottom: 1rem;
 }
-.count { font-family: var(--mono); font-size: .76rem; color: var(--muted); margin-left: auto; }
+.count { font-size: .86rem; color: var(--muted); margin-left: auto; }
 
 /* ---------- tables ---------- */
 
-.tablewrap { border: 1px solid var(--line); background: var(--surface); overflow-x: auto; }
-table.rows { width: 100%; border-collapse: collapse; font-size: .8rem; }
+.tablewrap { border-top: 1px solid var(--line); overflow-x: auto; }
+table.rows { width: 100%; border-collapse: collapse; font-size: .87rem; }
 table.rows th {
-  text-align: left; padding: .5rem .7rem; border-bottom: 1px solid var(--line);
-  font-family: var(--mono); font-size: .66rem; letter-spacing: .1em;
-  text-transform: uppercase; color: var(--muted); font-weight: 500;
-  white-space: nowrap; position: sticky; top: 0; background: var(--surface);
+  text-align: left; padding: .5rem .7rem .5rem 0; border-bottom: 1px solid var(--line);
+  font-size: .82rem; color: var(--muted); font-weight: 450;
+  white-space: nowrap; position: sticky; top: 0; background: var(--ground);
 }
-table.rows td { padding: .42rem .7rem; border-bottom: 1px solid var(--line-soft); vertical-align: top; }
+table.rows td {
+  padding: .44rem .7rem .44rem 0; border-bottom: 1px solid var(--line-soft);
+  vertical-align: top;
+}
 table.rows tr:last-child td { border-bottom: none; }
-table.rows tr:hover td { background: var(--surface-2); }
+table.rows tr:hover td { background: var(--surface); }
+
+/* An allow is the common case and recedes; a refusal and a request for a
+   person are what a reader is here to find. */
+table.rows tr.q td { color: var(--muted); }
+table.rows tr.q td.mono { color: var(--ink-2); }
+
 td.mono, .mono { font-family: var(--mono); font-variant-numeric: tabular-nums; }
 td.dim, .dim { color: var(--muted); }
 td.nowrap { white-space: nowrap; }
-.more { padding: .7rem 0; }
+.more { padding: .9rem 0; }
 
-/* ---------- disposition chips ---------- */
+/* ---------- verdicts ---------- */
 
 .chip {
-  display: inline-block; padding: .1rem .42rem; border-radius: 2px;
-  font-family: var(--mono); font-size: .66rem; font-weight: 500;
-  letter-spacing: .08em; text-transform: uppercase; white-space: nowrap;
+  display: inline-flex; align-items: baseline; gap: .4rem;
+  font-family: var(--mono); font-size: .8rem; white-space: nowrap;
 }
-.chip.allow { color: var(--allow); background: var(--allow-bg); }
-.chip.deny  { color: var(--deny);  background: var(--deny-bg); }
-.chip.reschedule { color: var(--resched); background: var(--resched-bg); }
-.chip.require_approval { color: var(--approval); background: var(--approval-bg); }
-.chip.plain { color: var(--muted); background: var(--surface-2); }
-.chip.released { color: var(--allow); background: var(--allow-bg); }
-.chip.refused { color: var(--deny); background: var(--deny-bg); }
-.chip.rescheduled { color: var(--resched); background: var(--resched-bg); }
-.chip.fired { color: var(--allow); background: var(--allow-bg); }
-.chip.waiting { color: var(--muted); background: var(--surface-2); }
-.chip.stale, .chip.abandoned, .chip.expired { color: var(--resched); background: var(--resched-bg); }
-.chip.pending { color: var(--approval); background: var(--approval-bg); }
-.chip.approved { color: var(--allow); background: var(--allow-bg); }
-.chip.rejected { color: var(--deny); background: var(--deny-bg); }
+.chip::before {
+  content: ""; width: 3px; height: .82em; flex: none;
+  background: currentColor; transform: translateY(.06em);
+}
+.chip.allow { color: var(--allow); }
+.chip.deny  { color: var(--deny); }
+.chip.reschedule { color: var(--resched); }
+.chip.require_approval { color: var(--approval); }
+.chip.plain, .chip.waiting { color: var(--muted); }
+.chip.released, .chip.fired, .chip.approved { color: var(--allow); }
+.chip.refused, .chip.rejected { color: var(--deny); }
+.chip.rescheduled, .chip.stale, .chip.abandoned, .chip.expired { color: var(--resched); }
+.chip.pending { color: var(--approval); }
 
 .rulechip {
-  display: inline-block; margin: 0 .3rem .18rem 0; padding: .04rem .34rem;
+  display: inline-block; margin: 0 .34rem .2rem 0; padding: .02rem .36rem;
   border: 1px solid var(--line); border-radius: 2px;
-  font-family: var(--mono); font-size: .66rem; color: var(--ink-2);
+  font-family: var(--mono); font-size: .78rem; color: var(--ink-2);
   cursor: pointer;
 }
-.rulechip:hover { border-color: var(--muted); }
+.rulechip:hover { border-color: var(--muted); color: var(--ink); }
 .rulechip.deny { color: var(--deny); border-color: var(--deny); }
 .rulechip.reschedule { color: var(--resched); border-color: var(--resched); }
 .rulechip.require_approval { color: var(--approval); border-color: var(--approval); }
 
 /* ---------- rule pressure ---------- */
 
-.rulelist { display: flex; flex-direction: column; gap: 1px; background: var(--line-soft); border: 1px solid var(--line-soft); }
-.rulerow { background: var(--surface); padding: .7rem .9rem; display: grid; grid-template-columns: 15rem 1fr; gap: 1rem; }
-.rulerow .id { font-family: var(--mono); font-size: .82rem; font-weight: 500; }
-.rulerow .why { font-size: .78rem; color: var(--muted); margin-top: .1rem; }
-.rulerow .meter { display: flex; flex-direction: column; gap: .3rem; justify-content: center; }
-.meterline { display: grid; grid-template-columns: 5.5rem 1fr 4rem; align-items: center; gap: .6rem; font-family: var(--mono); font-size: .72rem; }
-.meterline .track { height: 8px; background: var(--surface-2); border-radius: 2px; overflow: hidden; }
+.rulelist { border-top: 1px solid var(--line); }
+.rulerow {
+  padding: .85rem 0; display: grid; grid-template-columns: 16rem 1fr; gap: 1.4rem;
+  border-bottom: 1px solid var(--line-soft);
+}
+.rulerow .id { font-family: var(--mono); font-size: .92rem; letter-spacing: -.02em; }
+.rulerow .why { font-size: .84rem; color: var(--muted); margin-top: .12rem; }
+.rulerow .meter { display: flex; flex-direction: column; gap: .34rem; justify-content: center; }
+.meterline {
+  display: grid; grid-template-columns: 5.5rem 1fr 4rem; align-items: center;
+  gap: .7rem; font-size: .84rem;
+}
+.meterline .track { height: 9px; background: var(--line-soft); }
 .meterline .fill { height: 100%; background: var(--ink-2); }
 .meterline.naive .fill { background: var(--deny); }
 .meterline.backstop .fill { background: var(--allow); }
-.meterline .n { text-align: right; color: var(--muted); }
-.rulerow .silent { font-family: var(--mono); font-size: .72rem; color: var(--muted); align-self: center; }
+.meterline .n {
+  text-align: right; color: var(--muted);
+  font-family: var(--mono); font-variant-numeric: tabular-nums;
+}
+.rulerow .silent { font-size: .84rem; color: var(--muted); align-self: center; }
 
 /* ---------- cards ---------- */
 
-.cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(370px, 1fr)); gap: 1px; }
+.cards {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(370px, 1fr));
+  gap: 1px; background: var(--line-soft);
+  border-top: 1px solid var(--line-soft); border-left: 1px solid var(--line-soft);
+}
 .cards:empty { display: none; }
-.card { background: var(--surface); outline: 1px solid var(--line-soft); padding: .85rem 1rem 1rem; display: flex; flex-direction: column; gap: .4rem; }
+.card {
+  background: var(--ground); padding: .9rem 1.05rem 1rem;
+  display: flex; flex-direction: column; gap: .4rem;
+}
 .card .head { display: flex; align-items: baseline; gap: .5rem; flex-wrap: wrap; }
-.card .title { font-weight: 600; font-size: .88rem; }
-.card .what { font-family: var(--mono); font-size: .76rem; color: var(--ink-2); word-break: break-word; }
-.card .why { font-size: .8rem; color: var(--muted); }
+.card .title { font-weight: 600; font-size: .92rem; }
+.card .what { font-family: var(--mono); font-size: .82rem; color: var(--ink-2); word-break: break-word; }
+.card .why { font-size: .86rem; color: var(--muted); }
 .card .foot { display: flex; align-items: center; gap: .45rem; flex-wrap: wrap; margin-top: .2rem; }
-.card .foot button { padding: .22rem .55rem; font-size: .74rem; }
+.card .foot button { padding: .2rem .55rem; font-size: .8rem; }
+/* A probe that ruled as expected is the normal case and gets a quiet rail; a
+   mismatch gets the deny colour, because a bench only earns attention when it
+   fails. Green here would mean "matched expectation", and the four colours in
+   this interface already mean four verdicts. */
+.card.hit { box-shadow: inset 3px 0 0 var(--line); }
 .card.miss { box-shadow: inset 3px 0 0 var(--deny); }
-.card.hit { box-shadow: inset 3px 0 0 var(--allow); }
 
 .releaseout, .tickout {
-  border: 1px solid var(--line); background: var(--surface);
-  padding: .7rem .9rem; margin-bottom: 1rem;
-  font-family: var(--mono); font-size: .78rem;
-  display: flex; flex-wrap: wrap; gap: .4rem 1.2rem; align-items: center;
+  border-left: 3px solid var(--ink);
+  background: var(--surface);
+  padding: .7rem .95rem; margin-bottom: 1.1rem;
+  font-size: .88rem;
+  display: flex; flex-wrap: wrap; gap: .4rem 1.4rem; align-items: center;
 }
 .releaseout:empty, .tickout:empty { display: none; }
 .releaseout .refusal { color: var(--deny); }
 
 .benchsummary, .scorestrip {
-  display: flex; flex-wrap: wrap; gap: 1.6rem; margin-bottom: 1.2rem;
-  border: 1px solid var(--line); background: var(--surface); padding: .8rem 1rem;
+  display: flex; flex-wrap: wrap; gap: 0 2.6rem;
+  border-top: 1px solid var(--line); border-bottom: 1px solid var(--line);
+  padding: .85rem 0; margin-bottom: 1.4rem;
 }
 .benchsummary:empty, .scorestrip:empty { display: none; }
-.stat .k { font-family: var(--mono); font-size: .64rem; letter-spacing: .12em; text-transform: uppercase; color: var(--muted); }
-.stat .v { font-family: var(--mono); font-size: 1.05rem; }
+.stat .k { font-size: .82rem; color: var(--muted); }
+.stat .v {
+  font-family: var(--mono); font-size: 1.12rem; letter-spacing: -.03em;
+  font-variant-numeric: tabular-nums;
+}
 .stat .v.good { color: var(--allow); }
 .stat .v.bad { color: var(--deny); }
 
-.evidence { margin: .2rem 0 0; padding-left: 1rem; font-size: .78rem; color: var(--muted); }
+.evidence { margin: .2rem 0 0; padding-left: 1rem; font-size: .84rem; color: var(--muted); }
 .evidence li { margin-bottom: .1rem; }
 
 /* ---------- measurement ---------- */
 
-.surfacehead { font-size: 1.2rem; margin: 1.6rem 0 .6rem; }
-.surfacehead .dim { font-family: var(--sans); font-size: .82rem; font-weight: 400; }
+.surfacehead {
+  font-size: 1.32rem; margin: 2rem 0 .7rem; letter-spacing: -.02em;
+}
+.surfacehead .dim { font-family: var(--sans); font-size: .88rem; }
 table.rows tr.winner td { background: var(--allow-bg); }
 table.rows tr.winner td:first-child { font-weight: 600; }
 td.good { color: var(--allow); }
 td.bad { color: var(--deny); }
+
+@media (prefers-reduced-motion: no-preference) {
+  .bar-stack span { transition: width .28s ease; }
+}
+
+@media (max-width: 720px) {
+  .split { grid-template-columns: 1fr; gap: .5rem; }
+  .rulerow { grid-template-columns: 1fr; gap: .6rem; }
+  .surfacecard + .surfacecard { padding-left: 0; border-left: none; border-top: 1px solid var(--line-soft); }
+  .surfacecard { padding-right: 0; }
+}
